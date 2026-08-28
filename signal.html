@@ -20,6 +20,7 @@
       <li><a href="scan.html">Scanner</a></li>
       <li><a href="chart.html">Charts</a></li>
       <li><a href="tool.html">Paper Trade</a></li>
+      <li><a href="virtual.html" style="color:#c4b5fd">Virtual Trade</a></li>
       <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
     </ul>
     <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
@@ -65,8 +66,9 @@
     import { godBrain } from './js/god-mode.js?v=2.5';
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
-    startBuildCheck('2026-08-28-r14');
+    startBuildCheck('2026-08-28-r15');
     import { paperTrader } from './js/paper-trading.js?v=4.6';
+    import { virtualTrader } from './js/virtual-trading.js?v=1.0';
     const PROXY = '/signals/api/proxy.php';
     const MONTHS = { '01':'Jan','02':'Feb','03':'Mar','04':'Apr','05':'May','06':'Jun','07':'Jul','08':'Aug','09':'Sep','10':'Oct','11':'Nov','12':'Dec' };
     const MONMAP = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
@@ -326,6 +328,79 @@
 
     window.run = run;
     window.runAI = runAI;
+
+    // ══ VIRTUAL TRADE — capture the current signal into a manual order ticket ══
+    // The "⚡ Virtual Trade" button (rendered before Live Graph) opens this ticket.
+    // It reads the module-scope `currentSignal` at click time and places a manual
+    // position on the separate ₹1,00,000 virtual desk (?action=virtual_state).
+    virtualTrader.ready().catch(() => {});
+    (function initVirtualTrade() {
+      const modal = document.createElement('div');
+      modal.id = 'vt-modal';
+      modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:9998;align-items:center;justify-content:center;padding:1rem';
+      modal.innerHTML =
+        '<div style="background:#0f1522;border:1px solid rgba(167,139,250,0.4);border-radius:12px;max-width:440px;width:100%;padding:1.2rem;max-height:92vh;overflow:auto">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem"><h3 style="margin:0;color:#c4b5fd;font-size:1.1rem">⚡ Virtual Trade</h3><button id="vt-cancel" style="background:none;border:none;color:#9ca3af;font-size:1.3rem;cursor:pointer">✕</button></div>'
+        + '<div style="background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.25);border-radius:8px;padding:0.6rem 0.8rem;margin-bottom:0.8rem"><div id="vt-contract" style="font-weight:700;font-size:1rem;color:#e2e8f0"></div><div style="font-size:0.75rem;margin-top:0.2rem">Entry <span id="vt-entry" style="font-weight:700;color:#e2e8f0"></span> · <span id="vt-src"></span></div></div>'
+        + '<label style="font-size:0.72rem;color:#9ca3af">Lots<input id="vt-lots" type="number" min="1" step="1" value="1" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label>'
+        + '<div style="font-size:0.72rem;color:#9ca3af;margin-top:0.3rem">Cost <span id="vt-cost" style="color:#e2e8f0;font-weight:600"></span></div>'
+        + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.6rem">'
+        + '<label style="font-size:0.72rem;color:#9ca3af">Stop premium (₹)<input id="vt-stop" type="number" step="0.05" placeholder="optional" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label>'
+        + '<label style="font-size:0.72rem;color:#9ca3af">Target premium (₹)<input id="vt-target" type="number" step="0.05" placeholder="optional" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label>'
+        + '</div>'
+        + '<label style="font-size:0.72rem;color:#9ca3af;display:block;margin-top:0.5rem">Trailing stop (% off peak, optional)<input id="vt-trail" type="number" step="1" placeholder="e.g. 20" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label>'
+        + '<label style="font-size:0.72rem;color:#9ca3af;display:block;margin-top:0.5rem">Schedule a sell<select id="vt-sched-kind" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"><option value="none">None</option><option value="time">At IST time</option><option value="above">When premium ≥ price</option><option value="below">When premium ≤ price</option></select></label>'
+        + '<div id="vt-sched-time-row" style="display:none;margin-top:0.4rem"><label style="font-size:0.72rem;color:#9ca3af">Time (HH:MM IST)<input id="vt-sched-time" type="text" value="15:15" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label></div>'
+        + '<div id="vt-sched-price-row" style="display:none;margin-top:0.4rem"><label style="font-size:0.72rem;color:#9ca3af">Trigger premium (₹)<input id="vt-sched-price" type="number" step="0.05" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label></div>'
+        + '<label style="font-size:0.72rem;color:#9ca3af;display:block;margin-top:0.5rem">Note (why)<input id="vt-note" type="text" placeholder="optional" style="width:100%;margin-top:0.2rem;padding:0.4rem;background:#0a0e17;border:1px solid rgba(255,255,255,0.15);border-radius:6px;color:#e2e8f0"></label>'
+        + '<div style="display:flex;gap:0.5rem;margin-top:1rem"><button id="vt-place" style="flex:1;padding:0.6rem;background:linear-gradient(135deg,#7c3aed,#2563eb);border:none;border-radius:8px;color:#fff;font-weight:700;cursor:pointer">Place Virtual Trade</button></div>'
+        + '<div style="font-size:0.68rem;color:#6b7280;margin-top:0.6rem;text-align:center">Simulated on live prices · manage &amp; sell on the <a href="virtual.html" style="color:#c4b5fd">Virtual Trade</a> tab</div>'
+        + '</div>';
+      document.body.appendChild(modal);
+      const q = (sel) => modal.querySelector(sel);
+      const close = () => { modal.style.display = 'none'; };
+      modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+      q('#vt-cancel').addEventListener('click', close);
+
+      const entryOf = () => { const s = currentSignal; const t = (s && (s.optionTrade || s.watchTrade)) || {}; return { t, entry: Number(t.livePremium) || Number(t.entryPremium) || 0, lotSize: Number(t.lotSize) || 1 }; };
+      const costPreview = () => { const { entry, lotSize } = entryOf(); const lots = Math.max(1, parseInt(q('#vt-lots').value || '1', 10)); const cost = Math.round(entry * lots * lotSize * 1.023); q('#vt-cost').textContent = '≈ ₹' + cost.toLocaleString('en-IN') + ' (' + (lots * lotSize) + ' qty incl. slippage)'; };
+      const syncSched = () => { const k = q('#vt-sched-kind').value; q('#vt-sched-time-row').style.display = k === 'time' ? 'block' : 'none'; q('#vt-sched-price-row').style.display = (k === 'above' || k === 'below') ? 'block' : 'none'; };
+      q('#vt-lots').addEventListener('input', costPreview);
+      q('#vt-sched-kind').addEventListener('change', syncSched);
+
+      document.addEventListener('click', (e) => {
+        const b = e.target.closest && e.target.closest('.vt-open-btn'); if (!b) return;
+        const s = currentSignal;
+        if (!s) { alert('Please wait for a signal to load first.'); return; }
+        const t = s.optionTrade || s.watchTrade || {};
+        if (!t.strike || !t.type || !(t.expiry || t.expiryDisplay)) { alert('This signal has no exact listed contract to trade yet.'); return; }
+        const entry = Number(t.livePremium) || Number(t.entryPremium) || 0;
+        q('#vt-contract').textContent = s.symbol + ' ' + t.strike + ' ' + t.type + ' · ' + (t.expiryDisplay || t.expiry || '');
+        q('#vt-entry').textContent = '₹' + entry;
+        q('#vt-src').innerHTML = t.premiumSource === 'live' ? '<span style="color:#34d399">LIVE quote</span>' : '<span style="color:#fbbf24">estimated (no fresh live quote)</span>';
+        q('#vt-lots').value = 1; q('#vt-stop').value = ''; q('#vt-target').value = ''; q('#vt-trail').value = '';
+        q('#vt-note').value = ''; q('#vt-sched-kind').value = 'none'; q('#vt-sched-time').value = '15:15'; q('#vt-sched-price').value = '';
+        syncSched(); costPreview(); modal.style.display = 'flex';
+      });
+
+      q('#vt-place').addEventListener('click', async () => {
+        const s = currentSignal; if (!s) { alert('No signal.'); return; }
+        const lots = Math.max(1, parseInt(q('#vt-lots').value || '1', 10));
+        const stop = parseFloat(q('#vt-stop').value) || 0;
+        const target = parseFloat(q('#vt-target').value) || 0;
+        const trail = parseFloat(q('#vt-trail').value) || 0;
+        const note = q('#vt-note').value || '';
+        let schedule = null; const k = q('#vt-sched-kind').value;
+        if (k === 'time') { const m = /^(\d{1,2}):(\d{2})$/.exec((q('#vt-sched-time').value || '').trim()); if (m) { const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })); now.setHours(+m[1], +m[2], 0, 0); schedule = { kind: 'time', at: now.toISOString() }; } }
+        else if (k === 'above' || k === 'below') { const price = parseFloat(q('#vt-sched-price').value); if (price > 0) schedule = { kind: k === 'above' ? 'price_at_or_above' : 'price_at_or_below', price }; }
+        const btn = q('#vt-place'); btn.disabled = true; btn.textContent = 'Placing…';
+        try {
+          const pos = await virtualTrader.manualBuy({ signal: s, lots, stopPremium: stop, targetPremium: target, trailPct: trail, schedule, note });
+          close(); alert('Virtual trade placed: ' + pos.instrument + ' ' + pos.strike + ' ' + pos.type + ' × ' + pos.lots + ' lot(s).\nManage or sell it on the Virtual Trade tab.');
+        } catch (err) { alert('Could not place: ' + (err.message || err)); }
+        finally { btn.disabled = false; btn.textContent = 'Place Virtual Trade'; }
+      });
+    })();
 
     // ═══ SIGNAL LOCK — hysteresis state machine ══════════════════════════════
     // Problem: confidence sits right on the 60% line (live Aug-21 data showed 60.6
@@ -832,6 +907,7 @@
                         + (_gexp ? '&expiry=' + encodeURIComponent(_gexp) : '');
         h += '<div class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.5rem;margin-bottom:0.5rem">';
         h += '<div style="font-size:1.15rem;font-weight:700">'+s.symbol+' '+trade.strike+' '+trade.type+(trade.expiryDisplay?' · Expiry '+trade.expiryDisplay:'')+'</div>';
+        h += '<button type="button" class="signal-badge vt-open-btn" style="cursor:pointer;font-size:0.72rem;padding:0.3rem 0.7rem;border:1px solid #a78bfa;color:#c4b5fd;background:rgba(167,139,250,0.14);margin-right:0.4rem">⚡ Virtual Trade</button>';
         h += '<a href="'+_graphUrl+'" target="_blank" rel="noopener" class="signal-badge" style="text-decoration:none;font-size:0.72rem;padding:0.3rem 0.7rem;border:1px solid var(--primary);color:var(--primary);background:var(--primary-dim)">📈 Live Graph</a>';
         h += '</div>';
         if (!actionable) {

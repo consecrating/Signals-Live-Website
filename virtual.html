@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FNO Signal Pro — Virtual Trading (Manual)</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    .vt-header{background:linear-gradient(135deg,#3b1a5c,#1a2a4a);padding:1.5rem;border-radius:12px;margin-bottom:1.2rem;border:1px solid rgba(167,139,250,0.35)}
+    .vt-header h1{margin:0;font-size:1.5rem;color:#c4b5fd;display:flex;align-items:center;gap:0.5rem}
+    .vt-header .sub{color:#9ca3af;font-size:0.82rem;margin-top:0.3rem}
+    .vt-badge{background:rgba(167,139,250,0.2);color:#c4b5fd;font-size:0.65rem;padding:0.2rem 0.5rem;border-radius:3px;font-weight:700;text-transform:uppercase}
+    .vt-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:0.7rem;margin-bottom:1.2rem}
+    .vt-stat{background:rgba(15,20,30,0.7);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:0.7rem;text-align:center}
+    .vt-stat .label{font-size:0.63rem;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em}
+    .vt-stat .val{font-size:1.25rem;font-weight:700;margin-top:0.15rem;font-family:'JetBrains Mono',monospace}
+    .green{color:#34d399}.red{color:#f87171}.amber{color:#fbbf24}.purple{color:#a78bfa}.blue{color:#60a5fa}.muted{color:#6b7280}
+    .section-title{font-size:0.95rem;font-weight:700;color:#e2e8f0;margin:1.4rem 0 0.6rem;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap}
+    .eq-chart{width:100%;height:90px;background:rgba(0,0,0,0.3);border-radius:8px;overflow:hidden}.eq-chart svg{width:100%;height:100%}
+    .vpos{background:rgba(15,20,30,0.6);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.9rem;margin:0.5rem 0}
+    .vpos .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:0.5rem;font-size:0.78rem;margin:0.5rem 0}
+    .vpos .cell{background:rgba(0,0,0,0.2);border-radius:6px;padding:0.45rem}
+    .vpos .cell .l{color:#6b7280;font-size:0.62rem;text-transform:uppercase}
+    .vpos .cell .v{color:#e2e8f0;font-weight:700;font-size:0.95rem}
+    .btn{cursor:pointer;border-radius:6px;font-size:0.72rem;font-weight:700;padding:0.35rem 0.7rem;border:1px solid;background:transparent}
+    .btn.sell{border-color:#f87171;color:#f87171}.btn.sell:hover{background:rgba(239,68,68,0.12)}
+    .btn.mut{border-color:#60a5fa;color:#60a5fa}.btn.mut:hover{background:rgba(96,165,250,0.12)}
+    .btn.gr{border-color:#34d399;color:#34d399}.btn.gr:hover{background:rgba(16,185,129,0.12)}
+    .btnrow{display:flex;gap:0.4rem;flex-wrap:wrap;margin-top:0.4rem}
+    .badge{padding:0.1rem 0.4rem;border-radius:3px;font-size:0.65rem;font-weight:700}
+    .badge.buy{background:rgba(16,185,129,0.15);color:#34d399}.badge.sell{background:rgba(239,68,68,0.15);color:#f87171}
+    .t-row{display:grid;grid-template-columns:80px 50px 1fr 66px 66px 60px 84px;gap:0.4rem;padding:0.4rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.04);font-size:0.74rem;align-items:center}
+    .t-row.hdr{color:#6b7280;font-weight:600;text-transform:uppercase;font-size:0.63rem;border-bottom:1px solid rgba(255,255,255,0.1)}
+    .trade-log{max-height:360px;overflow-y:auto}
+    .no-data{color:#6b7280;font-style:italic;font-size:0.8rem;text-align:center;padding:1.3rem}
+    .toast{position:fixed;right:1rem;bottom:1rem;background:#1f2937;border:1px solid rgba(255,255,255,0.15);color:#e2e8f0;padding:0.7rem 1rem;border-radius:8px;font-size:0.82rem;z-index:9999;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,0.4)}
+    .toast.err{border-color:#f87171;color:#fca5a5}.toast.ok{border-color:#34d399;color:#6ee7b7}
+    .toolbar{display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center}
+  </style>
+</head>
+<body>
+  <div class="risk-banner">VIRTUAL TRADING — No real money. Manual simulation on live option prices; also trains the God Mode brain.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon" style="background:linear-gradient(135deg,#7c3aed,#2563eb)">⚡</div><span>Virtual Trading</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html" style="color:#34d399">Paper Trade</a></li>
+      <li><a href="virtual.html" class="active" style="color:#c4b5fd;background:rgba(167,139,250,0.12)">Virtual Trade</a></li>
+      <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <div class="vt-header">
+      <h1>⚡ Virtual Trading <span class="vt-badge">Manual · ₹1,00,000</span></h1>
+      <div class="sub">You place every buy and sell by hand on live option prices. Attach a stop/target, trail, or schedule an exit. Every closed trade is journaled and fed to the God Mode brain. <strong>To open a new trade, go to <a href="signal.html" style="color:#c4b5fd">Signals</a> and press “⚡ Virtual Trade”.</strong></div>
+    </div>
+
+    <div class="vt-stats" id="vt-stats"></div>
+
+    <div class="section-title">📈 Equity Curve</div>
+    <div class="eq-chart"><svg id="eq" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
+
+    <div class="section-title">⚡ Active Positions <span id="open-count" class="vt-badge">0</span>
+      <span class="toolbar" style="margin-left:auto">
+        <button class="btn mut" id="btn-refresh">↻ Requote</button>
+        <a class="btn gr" href="signal.html" style="text-decoration:none">+ New Trade (Signals)</a>
+      </span>
+    </div>
+    <div id="active-box"></div>
+
+    <div class="section-title">📋 Trade Log
+      <span class="toolbar" style="margin-left:auto">
+        <button class="btn mut" id="btn-csv">⬇ Export CSV</button>
+        <label style="font-size:0.72rem;color:#9ca3af;display:flex;align-items:center;gap:0.35rem"><input type="checkbox" id="brain-toggle"> Brain training</label>
+      </span>
+    </div>
+    <div class="trade-log" id="trade-log"></div>
+
+    <div class="section-title">📊 Performance by Instrument</div>
+    <div id="analytics"></div>
+
+    <div class="section-title">📝 Journal</div>
+    <div id="journal"></div>
+
+    <p class="text-xs muted" style="margin-top:1.5rem">Virtual desk v<span id="vt-ver">?</span> · Simulated fills include spread/impact slippage · Scheduled &amp; bracket exits require this tab (or Signals) to stay open, since evaluation runs in the browser.</p>
+  </main>
+
+  <script type="module">
+    import { virtualTrader, VT_VERSION, isMarketOpen } from './js/virtual-trading.js?v=1.0';
+    import { primeWriteAuth } from './js/core/write-auth.js?v=1.0';
+    import { startBuildCheck } from './js/core/build-check.js?v=1.0';
+    startBuildCheck('2026-08-28-r15');
+
+    const inr = (n) => '₹' + Math.round(Number(n) || 0).toLocaleString('en-IN');
+    const $ = (id) => document.getElementById(id);
+    function toast(msg, kind) { const t = document.createElement('div'); t.className = 'toast ' + (kind || ''); t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
+
+    (function ms(){ const i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'})); const d=i.getDay(),t=i.getHours()*60+i.getMinutes(); const e=$('mkt-t'),b=$('mkt'); if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';} else if(t>=555&&t<=930){e.textContent='MARKET OPEN';b.className='market-status-badge open';} else {e.textContent='CLOSED';b.className='market-status-badge closed';} setTimeout(ms,30000); })();
+
+    $('vt-ver').textContent = VT_VERSION;
+
+    function render() {
+      const s = virtualTrader.state;
+      const st = virtualTrader.getStats();
+      $('brain-toggle').checked = s.brainTraining !== false;
+
+      const pf = st.profitFactor === Infinity ? '∞' : st.profitFactor;
+      $('vt-stats').innerHTML = [
+        ['Capital', inr(st.capital), 'purple'],
+        ['Cash Free', inr(st.cash), ''],
+        ['Open Exposure', inr(st.openExposure), 'blue'],
+        ['Total P&L', (st.totalPnl >= 0 ? '+' : '') + inr(st.totalPnl), st.totalPnl >= 0 ? 'green' : 'red'],
+        ['Return', (st.returnPct >= 0 ? '+' : '') + st.returnPct + '%', st.returnPct >= 0 ? 'green' : 'red'],
+        ['Open', st.openCount, 'amber'],
+        ['Closed', st.closedCount, ''],
+        ['Win Rate', st.totalFills ? st.winRate + '%' : '—', st.winRate >= 50 ? 'green' : 'red'],
+        ['Profit Factor', pf, ''],
+        ['Max DD', st.maxDrawdownPct + '%', 'red'],
+      ].map(([l, v, c]) => `<div class="vt-stat"><div class="label">${l}</div><div class="val ${c}">${v}</div></div>`).join('');
+
+      // Equity curve
+      const eq = s.equityCurve || [];
+      const svg = $('eq');
+      if (eq.length > 1) {
+        const vals = eq.map(p => p.equity);
+        const mn = Math.min(...vals) * 0.999, mx = Math.max(...vals) * 1.001, rng = (mx - mn) || 1;
+        const pts = eq.map((c, i) => `${(i / (eq.length - 1)) * 600},${90 - ((c.equity - mn) / rng) * 78 - 6}`).join(' ');
+        svg.innerHTML = `<defs><linearGradient id="eg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(167,139,250,0.3)"/><stop offset="100%" stop-color="rgba(167,139,250,0)"/></linearGradient></defs><polyline fill="url(#eg)" points="${pts} 600,90 0,90"/><polyline fill="none" stroke="#a78bfa" stroke-width="1.5" points="${pts}"/>`;
+      } else { svg.innerHTML = ''; }
+
+      // Active positions
+      $('open-count').textContent = s.active.length;
+      const ab = $('active-box');
+      if (!s.active.length) { ab.innerHTML = '<div class="no-data">No open virtual positions. Open one from the Signals page → “⚡ Virtual Trade”.</div>'; }
+      else {
+        ab.innerHTML = s.active.map(p => {
+          const pnlPct = p.effectiveEntry > 0 ? Math.round(((p.currentPremium || p.effectiveEntry) - p.effectiveEntry) / p.effectiveEntry * 100) : 0;
+          const pnlAmt = Math.round(((p.currentPremium || p.effectiveEntry) - p.effectiveEntry) * p.qty);
+          const col = pnlAmt >= 0 ? 'green' : 'red';
+          const sch = p.schedule ? (p.schedule.kind === 'time' ? ('SELL at ' + new Date(p.schedule.at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })) : ('SELL when premium ' + (p.schedule.kind === 'price_at_or_above' ? '≥ ' : '≤ ') + '₹' + p.schedule.price)) : '—';
+          return `<div class="vpos">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem">
+              <div><span class="badge ${p.direction === 'BUY' ? 'buy' : 'sell'}">${p.direction}</span>
+              <strong style="font-size:1rem;margin-left:0.4rem">${p.instrument} ${p.strike} ${p.type}</strong>
+              <span class="muted" style="font-size:0.7rem"> ${p.expiryDisplay || p.expiry} · ${p.lots} lot(s) × ${p.lotSize}</span></div>
+              <div class="${col}" style="font-weight:700;font-size:1.15rem">${pnlAmt >= 0 ? '+' : ''}${pnlPct}% (${pnlAmt >= 0 ? '+' : ''}${inr(pnlAmt)})</div>
+            </div>
+            <div class="grid">
+              <div class="cell"><div class="l">Entry (incl slip)</div><div class="v">₹${p.effectiveEntry}</div></div>
+              <div class="cell"><div class="l">Live</div><div class="v ${col}">₹${p.currentPremium || p.effectiveEntry}</div></div>
+              <div class="cell"><div class="l">Stop</div><div class="v red">${p.stopPremium ? '₹' + p.stopPremium : '—'}</div></div>
+              <div class="cell"><div class="l">Target</div><div class="v green">${p.targetPremium ? '₹' + p.targetPremium : '—'}</div></div>
+              <div class="cell"><div class="l">Trail</div><div class="v">${p.trailPct ? p.trailPct + '%' : '—'}</div></div>
+              <div class="cell"><div class="l">Cost</div><div class="v">${inr(p.cost)}</div></div>
+              <div class="cell" style="grid-column:span 2"><div class="l">Schedule</div><div class="v" style="font-size:0.8rem">${sch}</div></div>
+              <div class="cell"><div class="l">Confidence</div><div class="v amber">${p.confidence != null ? Math.round(p.confidence) + '%' : '—'}</div></div>
+            </div>
+            <div class="btnrow">
+              <button class="btn sell" data-act="sell" data-id="${p.id}" data-pct="100">Sell 100%</button>
+              <button class="btn sell" data-act="sell" data-id="${p.id}" data-pct="50">Sell 50%</button>
+              <button class="btn sell" data-act="sell" data-id="${p.id}" data-pct="25">Sell 25%</button>
+              <button class="btn mut" data-act="sched" data-id="${p.id}">⏰ Schedule sell</button>
+              ${p.schedule ? `<button class="btn mut" data-act="cancelsched" data-id="${p.id}">✕ Cancel schedule</button>` : ''}
+              <button class="btn mut" data-act="note" data-id="${p.id}">📝 Note</button>
+            </div>
+          </div>`;
+        }).join('');
+      }
+
+      // Trade log
+      const tl = $('trade-log');
+      const hdr = '<div class="t-row hdr"><div>Exit</div><div>Dir</div><div>Contract</div><div>Entry</div><div>Exit</div><div>P&L%</div><div>Outcome</div></div>';
+      if (!s.trades.length) tl.innerHTML = hdr + '<div class="no-data">No closed trades yet.</div>';
+      else tl.innerHTML = hdr + [...s.trades].reverse().map(t => {
+        const c = t.pnl >= 0 ? 'green' : 'red';
+        const tm = new Date(t.exitDate).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+        return `<div class="t-row"><div class="muted">${tm}</div><div><span class="badge ${t.direction === 'BUY' ? 'buy' : 'sell'}">${t.direction}</span></div>
+          <div>${t.instrument} ${t.strike} ${t.type}${t.partial ? ' <span class="muted">(part)</span>' : ''}</div>
+          <div>₹${t.effectiveEntry}</div><div>₹${t.exitPremium}</div>
+          <div class="${c}">${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct}%</div><div class="${c}" style="font-size:0.66rem">${t.outcome}</div></div>`;
+      }).join('');
+
+      // Analytics by instrument
+      const an = $('analytics');
+      const bi = st.byInstrument || {};
+      const keys = Object.keys(bi);
+      an.innerHTML = keys.length ? keys.map(k => {
+        const d = bi[k]; const wr = d.trades ? Math.round(d.wins / d.trades * 100) : 0;
+        return `<div class="t-row"><div style="grid-column:span 2"><strong>${k}</strong></div><div>${d.trades} trades</div><div class="${wr >= 50 ? 'green' : 'red'}">${wr}% WR</div><div style="grid-column:span 3" class="${d.pnl >= 0 ? 'green' : 'red'}">${d.pnl >= 0 ? '+' : ''}${inr(d.pnl)}</div></div>`;
+      }).join('') : '<div class="no-data">Analytics populate after your first closed trade.</div>';
+
+      // Journal
+      const jr = $('journal');
+      const notes = (s.journal || []).slice(-12).reverse();
+      jr.innerHTML = notes.length ? notes.map(n => `<div class="t-row" style="grid-template-columns:80px 60px 1fr"><div class="muted">${new Date(n.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div><div class="muted">${n.kind}</div><div>${(n.text || '').replace(/[<>]/g, '')}</div></div>`).join('') : '<div class="no-data">No journal notes yet.</div>';
+    }
+
+    // ── Action delegation ──
+    $('active-box').addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-act]'); if (!btn) return;
+      const id = btn.dataset.id, act = btn.dataset.act;
+      try {
+        if (act === 'sell') {
+          const pct = Number(btn.dataset.pct);
+          if (!confirm(`Sell ${pct}% of this position at the current live price?`)) return;
+          btn.disabled = true;
+          const rec = await virtualTrader.manualSell(id, { pct });
+          toast(`Sold ${pct}% · ${rec.outcome} · P&L ${rec.pnl >= 0 ? '+' : ''}${inr(rec.pnl)}`, rec.pnl >= 0 ? 'ok' : 'err');
+        } else if (act === 'sched') {
+          const kind = (prompt('Schedule type — type "time" for a clock time, or "price" for a premium trigger:', 'time') || '').trim().toLowerCase();
+          if (kind === 'time') {
+            const hhmm = (prompt('Sell at what IST time today? (HH:MM, 24h)', '15:15') || '').trim();
+            const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm); if (!m) return toast('Invalid time.', 'err');
+            const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+            now.setHours(+m[1], +m[2], 0, 0);
+            await virtualTrader.setSchedule(id, { kind: 'time', at: now.toISOString() });
+            toast('Scheduled time sell set for ' + hhmm + ' IST.', 'ok');
+          } else if (kind === 'price') {
+            const dir = (prompt('Trigger when premium is Above or Below? (a/b)', 'a') || '').trim().toLowerCase();
+            const price = Number(prompt('At what premium (₹)?', ''));
+            if (!(price > 0)) return toast('Invalid price.', 'err');
+            await virtualTrader.setSchedule(id, { kind: dir === 'b' ? 'price_at_or_below' : 'price_at_or_above', price });
+            toast('Scheduled price sell set.', 'ok');
+          } else { return; }
+        } else if (act === 'cancelsched') {
+          await virtualTrader.cancelSchedule(id); toast('Schedule cleared.', 'ok');
+        } else if (act === 'note') {
+          const txt = prompt('Add a journal note for this position:', ''); if (!txt) return;
+          await virtualTrader.addJournalNote(id, txt); toast('Note added.', 'ok');
+        }
+        render();
+      } catch (err) { toast(err.message || 'Action failed', 'err'); await virtualTrader.refresh(); render(); }
+    });
+
+    $('btn-refresh').addEventListener('click', async () => { try { await virtualTrader.monitor(); render(); toast('Requoted.', 'ok'); } catch (e) { toast('Requote failed', 'err'); } });
+    $('btn-csv').addEventListener('click', () => {
+      const csv = virtualTrader.toCSV(); const blob = new Blob([csv], { type: 'text/csv' });
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'virtual-trades-' + new Date().toISOString().split('T')[0] + '.csv'; a.click();
+    });
+    $('brain-toggle').addEventListener('change', async (e) => { try { await virtualTrader.setBrainTraining(e.target.checked); toast('Brain training ' + (e.target.checked ? 'ON' : 'OFF'), 'ok'); } catch (err) { toast('Could not update', 'err'); } });
+
+    // ── Boot + loops ──
+    primeWriteAuth();
+    await virtualTrader.ready();
+    render();
+
+    // Refresh from server every 10s (viewer sync), monitor/requote every 15s.
+    setInterval(async () => { try { await virtualTrader.refresh(); render(); } catch (e) {} }, 10000);
+    setInterval(async () => { try { const r = await virtualTrader.monitor(); if (r.closed) toast(r.closed + ' position(s) auto-exited (bracket/schedule).', 'ok'); render(); } catch (e) {} }, 15000);
+  </script>
+</body>
+</html>

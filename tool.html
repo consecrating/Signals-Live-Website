@@ -57,6 +57,7 @@
       <li><a href="scan.html">Scanner</a></li>
       <li><a href="chart.html">Charts</a></li>
       <li><a href="tool.html" class="active" style="color:#34d399;background:rgba(16,185,129,0.12)">Paper Trade</a></li>
+      <li><a href="virtual.html" style="color:#c4b5fd">Virtual Trade</a></li>
       <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
     </ul>
     <div class="nav-status"><div id="mkt" class="market-status-badge"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
@@ -180,7 +181,7 @@
   <script type="module">
     import { paperTrader, STRATEGIES } from './js/paper-trading.js?v=4.6';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
-    startBuildCheck('2026-08-28-r14');
+    startBuildCheck('2026-08-28-r15');
 
     // ═══ SERVER IS THE ONLY SOURCE OF TRUTH ═══════════════════════════════════
     // Previously render() (10s) painted these tiles from browser state while

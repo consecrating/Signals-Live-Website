@@ -142,7 +142,7 @@ define('API_BASE', 'https://apiconnect.angelone.in');
 
 // Bump on every deploy. Pages compare their embedded build to this and prompt a
 // reload when they differ, so a stale open tab can no longer masquerade as a bug.
-define('APP_BUILD', '2026-08-28-r14');
+define('APP_BUILD', '2026-08-28-r15');
 
 // ── AI Paper Trading budget — SINGLE SOURCE OF TRUTH ────────────────────────
 // These MUST stay in step with INITIAL_CAPITAL / MAX_PER_TRADE in js/paper-trading.js.
@@ -153,6 +153,10 @@ define('APP_BUILD', '2026-08-28-r14');
 // values so the page can render from them instead of hardcoding its own copy.
 define('PAPER_INITIAL_CAPITAL', 100000); // ₹1,00,000 total budget
 define('PAPER_MAX_PER_TRADE', 20000);    // never exceed ₹20,000 in one trade
+
+// ── Manual Virtual Trading desk — separate ledger from the auto paper trader ──
+// Human-driven buy/sell/schedule from signal.html + virtual.html. ₹1,00,000 book.
+define('VIRTUAL_CAPITAL', 100000);
 
 // ─── Token Cache ─────────────────────────────────────────────────────────────
 $tokenCacheFile = sys_get_temp_dir() . '/angelone_jwt_cache.json';
@@ -450,6 +454,10 @@ switch ($action) {
 
     case 'paper_state':
         handlePaperState();
+        break;
+
+    case 'virtual_state':
+        handleVirtualState();
         break;
 
     case 'paper_lease':
@@ -2934,6 +2942,133 @@ function handlePaperState() {
     // Budget is always authoritative from the server side.
     $state['initialCapital'] = PAPER_INITIAL_CAPITAL;
     $state['maxPerTrade']    = PAPER_MAX_PER_TRADE;
+    echo json_encode(['status' => true, 'state' => $state]);
+}
+
+/**
+ * Manual Virtual Trading desk state (₹1,00,000).
+ *
+ * This is a separate ledger from the auto paper trader. It is driven ONLY by
+ * explicit human actions (buy / sell / schedule) from signal.html and
+ * virtual.html, so there is deliberately NO executor-lease fence — a manual
+ * click must always be allowed. Instead, concurrency is protected by:
+ *   1. a flock while writing (two overlapping writes cannot interleave), and
+ *   2. an optimistic `rev` counter — the client sends the rev it loaded as
+ *      `baseRev`; if the stored rev has moved on, the write is rejected 409 and
+ *      the client re-hydrates. This stops a monitor tab and a user click from
+ *      silently clobbering each other.
+ * The server owns the budget constant and the monotonic rev; the client cannot
+ * choose either. Manual actions are audited once per unique actionId.
+ */
+function handleVirtualState() {
+    $dir = __DIR__ . '/../brain-data/virtual';
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    $file = $dir . '/state.json';
+
+    // Destructive reset is admin-only and never reachable via a plain GET.
+    if ($_SERVER['REQUEST_METHOD'] === 'DELETE' || ($_GET['reset'] ?? '') === '1') {
+        requireAdminAuth();
+        @unlink($file);
+        auditLog('recovery', 'virtual_state_reset', []);
+        echo json_encode(['status' => true, 'reset' => true]);
+        return;
+    }
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        requireWriteAuth('virtual_state', 240, 60);
+        $raw = file_get_contents('php://input');
+        $data = json_decode($raw, true);
+        if (!is_array($data)) { echo json_encode(['status' => false, 'error' => 'Invalid state']); return; }
+
+        $stateLock = @fopen($file . '.lock', 'c+');
+        if (!$stateLock || !flock($stateLock, LOCK_EX)) {
+            if (is_resource($stateLock)) fclose($stateLock);
+            http_response_code(500);
+            echo json_encode(['status' => false, 'error' => 'Virtual state lock unavailable']); return;
+        }
+
+        $priorState = file_exists($file) ? json_decode(@file_get_contents($file), true) : [];
+        if (!is_array($priorState)) $priorState = [];
+        $priorRev = (int)($priorState['rev'] ?? 0);
+        $baseRev  = (int)($data['baseRev'] ?? 0);
+
+        // Optimistic concurrency. A first write against a fresh/seeded ledger
+        // (priorRev 0) is always allowed; after that the client must be current.
+        if ($priorRev > 0 && $baseRev !== $priorRev) {
+            flock($stateLock, LOCK_UN); fclose($stateLock);
+            http_response_code(409);
+            echo json_encode(['status' => false, 'error' => 'Stale virtual state; reload', 'serverRev' => $priorRev]);
+            return;
+        }
+
+        // Server owns budget + rev; strip any client attempt to set them.
+        unset($data['baseRev']);
+        $data['initialCapital'] = VIRTUAL_CAPITAL;
+        $data['rev']            = $priorRev + 1;
+        $data['updatedAt']      = date('c');
+
+        // Audit a manual action exactly once (dedupe client retries by actionId).
+        $actionId      = is_string($data['lastActionId'] ?? null) ? $data['lastActionId'] : null;
+        $priorActionId = is_string($priorState['lastActionId'] ?? null) ? $priorState['lastActionId'] : null;
+        $doAudit = $actionId !== null && $actionId !== $priorActionId && is_array($data['lastAction'] ?? null);
+
+        $encoded = json_encode($data);
+        $tmp = $file . '.tmp';
+        if ($encoded === false || @file_put_contents($tmp, $encoded, LOCK_EX) === false) {
+            flock($stateLock, LOCK_UN); fclose($stateLock);
+            http_response_code(500);
+            echo json_encode(['status' => false, 'error' => 'Write failed']); return;
+        }
+        if (!@rename($tmp, $file)) {
+            @unlink($tmp);
+            flock($stateLock, LOCK_UN); fclose($stateLock);
+            http_response_code(500);
+            echo json_encode(['status' => false, 'error' => 'Atomic state swap failed']); return;
+        }
+        if ($doAudit) {
+            $a = $data['lastAction'];
+            auditLog('order', 'virtual_trade', [
+                'actionId'   => $actionId,
+                'action'     => $a['action'] ?? null,
+                'instrument' => $a['instrument'] ?? null,
+                'direction'  => $a['direction'] ?? null,
+                'strike'     => $a['strike'] ?? null,
+                'type'       => $a['type'] ?? null,
+                'lots'       => $a['lots'] ?? null,
+                'premium'    => $a['premium'] ?? null,
+                'pnl'        => $a['pnl'] ?? null,
+                'reason'     => $a['reason'] ?? null,
+            ], 'info');
+        }
+        flock($stateLock, LOCK_UN); fclose($stateLock);
+        echo json_encode(['status' => true, 'rev' => $data['rev'], 'updatedAt' => $data['updatedAt']]);
+        return;
+    }
+
+    if (!file_exists($file)) {
+        // Seed a fresh ₹1,00,000 ledger.
+        echo json_encode(['status' => true, 'state' => [
+            'initialCapital' => VIRTUAL_CAPITAL,
+            'capital'        => VIRTUAL_CAPITAL,
+            'cash'           => VIRTUAL_CAPITAL,
+            'peakCapital'    => VIRTUAL_CAPITAL,
+            'startDate'      => date('Y-m-d'),
+            'active'         => [],
+            'trades'         => [],
+            'journal'        => [],
+            'totalPnl'       => 0,
+            'totalSlippage'  => 0,
+            'equityCurve'    => [['date' => date('Y-m-d'), 'equity' => VIRTUAL_CAPITAL]],
+            'brainTraining'  => true,
+            'rev'            => 0,
+            'seeded'         => true,
+        ]]);
+        return;
+    }
+
+    $state = json_decode(@file_get_contents($file), true);
+    if (!is_array($state)) { echo json_encode(['status' => false, 'error' => 'Corrupt state']); return; }
+    $state['initialCapital'] = VIRTUAL_CAPITAL; // budget is always server-authoritative
     echo json_encode(['status' => true, 'state' => $state]);
 }
 
