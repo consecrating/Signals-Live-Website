@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>FNO Signal Pro — Live Dashboard</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <!-- Risk Banner -->
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Signals are for informational purposes only — not financial advice. Trade at your own risk.</div>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="navbar-brand">
+      <div class="logo-icon">F</div>
+      <span>FNO Signal Pro</span>
+    </div>
+    <ul class="nav-links">
+      <li><a href="live.html" class="active" style="color:var(--primary);background:var(--primary-dim)">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Paper Trade</a></li>
+      <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
+    </ul>
+    <div class="nav-status">
+      <div id="market-status" class="market-status-badge open">
+        <span class="status-dot"></span><span id="market-status-text">LOADING</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Page Content -->
+  <main class="page-container">
+    <!-- Market Overview -->
+    <section>
+      <div class="section-header">
+        <h2>Market Overview</h2>
+        <span class="section-badge" id="last-update">Loading...</span>
+      </div>
+      <div id="indices-grid" class="grid grid-4">
+        <div class="card index-card"><span class="index-name">NIFTY 50</span><span class="index-price num" style="color:var(--text-muted)">Loading...</span></div>
+        <div class="card index-card"><span class="index-name">BANKNIFTY</span><span class="index-price num" style="color:var(--text-muted)">Loading...</span></div>
+        <div class="card index-card"><span class="index-name">FINNIFTY</span><span class="index-price num" style="color:var(--text-muted)">Loading...</span></div>
+        <div class="card index-card"><span class="index-name">MIDCPNIFTY</span><span class="index-price num" style="color:var(--text-muted)">Loading...</span></div>
+      </div>
+    </section>
+
+    <!-- VIX + Quick Info -->
+    <section class="grid grid-3 mt-3">
+      <div class="card">
+        <div class="card-header"><span class="card-title">India VIX</span></div>
+        <div id="vix-display" style="text-align:center;padding:0.5rem 0">
+          <span style="color:var(--text-muted)">Loading...</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">FII / DII Activity</span></div>
+        <div id="fii-dii-panel"><span style="color:var(--text-muted);font-size:0.8rem">Not available via Angel One API</span></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Top Movers</span></div>
+        <div id="movers-panel" style="font-size:0.8rem;color:var(--text-muted)">Loading...</div>
+      </div>
+    </section>
+
+    <!-- Live Quotes -->
+    <section class="mt-3">
+      <div class="section-header">
+        <h2>Live Quotes — F&amp;O Stocks</h2>
+        <button id="refresh-btn" class="btn btn-outline" onclick="loadAll()">🔄 Refresh</button>
+      </div>
+      <div class="card">
+        <div id="stocks-table" style="overflow-x:auto">
+          <span style="color:var(--text-muted);padding:1rem;display:block">Loading stock data...</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Disclaimer -->
+    <div class="disclaimer">
+      <strong>DISCLAIMER:</strong> For informational purposes only. Not financial advice. Trade at your own risk. 
+      F&amp;O trading involves substantial risk of capital loss. Past performance does not guarantee future results.
+    </div>
+  </main>
+
+  <!-- INLINE SCRIPT: No external modules, no caching issues -->
+  <script>
+    const PROXY = '/signals/api/proxy.php';
+
+    // Market status
+    (function updateStatus() {
+      var now = new Date();
+      var ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      var day = ist.getDay(), h = ist.getHours(), m = ist.getMinutes();
+      var t = h * 60 + m;
+      var el = document.getElementById('market-status-text');
+      var badge = document.getElementById('market-status');
+      if (day === 0 || day === 6) {
+        el.textContent = 'CLOSED'; badge.className = 'market-status-badge closed';
+      } else if (t >= 555 && t <= 930) {
+        el.textContent = 'MARKET OPEN'; badge.className = 'market-status-badge open';
+      } else if (t >= 540 && t < 555) {
+        el.textContent = 'PRE-MARKET'; badge.className = 'market-status-badge pre-market';
+      } else {
+        el.textContent = 'CLOSED'; badge.className = 'market-status-badge closed';
+      }
+      setTimeout(updateStatus, 30000);
+    })();
+
+    function fmt(n) {
+      if (n === null || n === undefined) return '—';
+      return Number(n).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+
+    async function loadIndices() {
+      try {
+        var res = await fetch(PROXY + '?action=indices');
+        var data = await res.json();
+        if (!data.status || !data.data) throw new Error('No data');
+
+        var grid = document.getElementById('indices-grid');
+        var html = '';
+        var order = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'];
+        for (var i = 0; i < order.length; i++) {
+          var sym = order[i];
+          var info = data.data[sym];
+          if (info) {
+            var cls = info.percentChange >= 0 ? 'positive' : 'negative';
+            var sign = info.percentChange >= 0 ? '+' : '';
+            html += '<div class="card index-card">' +
+              '<span class="index-name">' + (info.name || sym) + '</span>' +
+              '<span class="index-price num">' + fmt(info.ltp) + '</span>' +
+              '<span class="index-change ' + cls + ' num">' + sign + fmt(info.percentChange) + '%</span>' +
+              '</div>';
+          }
+        }
+        grid.innerHTML = html;
+        document.getElementById('last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata'}) + ' IST';
+      } catch(e) {
+        console.error('Indices failed:', e);
+        document.getElementById('indices-grid').innerHTML = '<div class="card" style="grid-column:span 4;text-align:center;padding:1rem"><span style="color:var(--danger)">Failed to load indices: ' + e.message + '</span></div>';
+      }
+    }
+
+    async function loadVIX() {
+      try {
+        var res = await fetch(PROXY + '?action=quote&symbols=INDIAVIX');
+        var data = await res.json();
+        if (!data.status || !data.data || !data.data.length) throw new Error('No VIX data');
+        var vix = data.data[0];
+        var val = vix.ltp;
+        if (!(val > 0 && val <= 150)) throw new Error("VIX out of sane range: " + val);
+        var cls = val >= 20 ? 'high' : val >= 15 ? 'medium' : 'low';
+        var el = document.getElementById('vix-display');
+        el.innerHTML = '<span class="vix-value ' + cls + '">' + fmt(val) + '</span>' +
+          '<p class="text-xs text-muted" style="margin-top:0.25rem">' + (vix.percentChange >= 0 ? '+' : '') + fmt(vix.percentChange) + '% from prev close</p>' +
+          '<p class="text-xs ' + (cls==='low'?'text-green':cls==='high'?'text-red':'text-amber') + '" style="margin-top:0.25rem">' +
+          (cls==='low' ? '✓ Low vol — directional trades favorable' : cls==='high' ? 'High vol — hedge positions' : '△ Moderate vol') + '</p>';
+      } catch(e) {
+        document.getElementById('vix-display').innerHTML = '<span class="vix-value text-muted" style="font-size:1.3rem">—</span><p class="text-xs text-muted">Unavailable</p>';
+      }
+    }
+
+    async function loadStocks() {
+      try {
+        var res = await fetch(PROXY + '?action=quote&symbols=RELIANCE,HDFCBANK,ICICIBANK,INFY,TCS,SBIN,BHARTIARTL,ITC,TATAMOTORS,BAJFINANCE');
+        var data = await res.json();
+        if (!data.status || !data.data) throw new Error('No stock data');
+
+        var html = '<table class="data-table"><thead><tr><th>Symbol</th><th>LTP</th><th>Change %</th><th>Open</th><th>High</th><th>Low</th></tr></thead><tbody>';
+        var moversUp = [], moversDown = [];
+        
+        data.data.forEach(function(s) {
+          var cls = s.percentChange >= 0 ? 'positive' : 'negative';
+          var sign = s.percentChange >= 0 ? '+' : '';
+          html += '<tr><td class="font-bold">' + (s.symbol || s.tradingSymbol) + '</td>' +
+            '<td class="num">' + fmt(s.ltp) + '</td>' +
+            '<td class="num ' + cls + '">' + sign + fmt(s.percentChange) + '%</td>' +
+            '<td class="num">' + fmt(s.open) + '</td>' +
+            '<td class="num">' + fmt(s.high) + '</td>' +
+            '<td class="num">' + fmt(s.low) + '</td></tr>';
+          
+          if (s.percentChange > 0) moversUp.push({sym: s.symbol || s.tradingSymbol, chg: s.percentChange});
+          else moversDown.push({sym: s.symbol || s.tradingSymbol, chg: s.percentChange});
+        });
+        html += '</tbody></table>';
+        document.getElementById('stocks-table').innerHTML = html;
+
+        // Top movers
+        moversUp.sort(function(a,b){return b.chg - a.chg});
+        moversDown.sort(function(a,b){return a.chg - b.chg});
+        var mhtml = '';
+        if (moversUp.length) mhtml += '<p class="text-green text-xs">' + moversUp.slice(0,3).map(function(m){return m.sym+' +'+m.chg.toFixed(1)+'%'}).join(', ') + '</p>';
+        if (moversDown.length) mhtml += '<p class="text-red text-xs" style="margin-top:0.25rem">' + moversDown.slice(0,3).map(function(m){return m.sym+' '+m.chg.toFixed(1)+'%'}).join(', ') + '</p>';
+        document.getElementById('movers-panel').innerHTML = mhtml || '<span class="text-muted text-xs">No data</span>';
+      } catch(e) {
+        document.getElementById('stocks-table').innerHTML = '<p style="color:var(--danger);padding:1rem">Failed: ' + e.message + '</p>';
+      }
+    }
+
+    async function loadAll() {
+      document.getElementById('refresh-btn').textContent = '⏳ Loading...';
+      await Promise.all([loadIndices(), loadVIX(), loadStocks()]);
+      document.getElementById('refresh-btn').textContent = '🔄 Refresh';
+    }
+
+    // Load immediately
+    loadAll();
+
+    // Auto-refresh every 30s during market hours
+    setInterval(function() {
+      var now = new Date();
+      var ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      var day = ist.getDay(), t = ist.getHours() * 60 + ist.getMinutes();
+      if (day >= 1 && day <= 5 && t >= 555 && t <= 930) {
+        loadAll();
+      }
+    }, 30000);
+  </script>
+</body>
+</html>

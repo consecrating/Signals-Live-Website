@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FNO Signal Pro — AI Paper Trading</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    .pt-header{background:linear-gradient(135deg,#0f4c3a,#1a3a4a);padding:1.5rem;border-radius:12px;margin-bottom:1.5rem;border:1px solid rgba(16,185,129,0.3)}
+    .pt-header h1{margin:0;font-size:1.5rem;color:#34d399;display:flex;align-items:center;gap:0.5rem}
+    .pt-header .sub{color:#9ca3af;font-size:0.82rem;margin-top:0.3rem}
+    .auto-badge{background:rgba(16,185,129,0.2);color:#34d399;font-size:0.65rem;padding:0.2rem 0.5rem;border-radius:3px;font-weight:700;text-transform:uppercase}
+    .pt-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:0.7rem;margin-bottom:1.5rem}
+    .pt-stat{background:rgba(15,20,30,0.7);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:0.7rem;text-align:center}
+    .pt-stat .label{font-size:0.65rem;color:#6b7280;text-transform:uppercase;letter-spacing:0.05em}
+    .pt-stat .val{font-size:1.3rem;font-weight:700;margin-top:0.15rem;font-family:'JetBrains Mono',monospace}
+    .green{color:#34d399} .red{color:#f87171} .amber{color:#fbbf24} .purple{color:#a78bfa} .blue{color:#60a5fa}
+    .section-title{font-size:0.95rem;font-weight:700;color:#e2e8f0;margin:1.5rem 0 0.7rem;display:flex;align-items:center;gap:0.5rem}
+    .eq-chart{width:100%;height:100px;background:rgba(0,0,0,0.3);border-radius:8px;overflow:hidden}
+    .eq-chart svg{width:100%;height:100%}
+    .trade-log{max-height:400px;overflow-y:auto}
+    .t-row{display:grid;grid-template-columns:75px 55px 1fr 70px 70px 60px 60px;gap:0.4rem;padding:0.4rem 0.6rem;border-bottom:1px solid rgba(255,255,255,0.04);font-size:0.75rem;align-items:center}
+    .t-row.hdr{color:#6b7280;font-weight:600;text-transform:uppercase;font-size:0.65rem;border-bottom:1px solid rgba(255,255,255,0.1);position:sticky;top:0;background:#0a0e17;z-index:1}
+    .t-row:hover{background:rgba(59,130,246,0.04)}
+    .badge{padding:0.1rem 0.35rem;border-radius:3px;font-size:0.65rem;font-weight:700}
+    .badge.buy{background:rgba(16,185,129,0.15);color:#34d399}
+    .badge.sell{background:rgba(239,68,68,0.15);color:#f87171}
+    .badge.win{background:rgba(16,185,129,0.15);color:#34d399}
+    .badge.loss{background:rgba(239,68,68,0.15);color:#f87171}
+    .badge.open{background:rgba(245,158,11,0.15);color:#fbbf24}
+    .strat-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0.6rem}
+    .strat-card{background:rgba(15,20,30,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:0.7rem}
+    .strat-card h4{margin:0 0 0.4rem;font-size:0.8rem;color:#a78bfa}
+    .strat-card .sr{font-size:0.72rem;color:#9ca3af}
+    .strat-card .sr span{color:#e2e8f0;font-weight:600}
+    .shadow-row{display:grid;grid-template-columns:75px 55px 1fr 80px 70px;gap:0.4rem;padding:0.35rem 0.6rem;font-size:0.72rem;border-bottom:1px solid rgba(255,255,255,0.03)}
+    .insight-card{background:rgba(15,20,30,0.5);border-left:3px solid;border-radius:0 6px 6px 0;padding:0.6rem 0.8rem;margin:0.4rem 0;font-size:0.78rem}
+    .insight-card.high{border-color:#f87171} .insight-card.medium{border-color:#fbbf24} .insight-card.low{border-color:#60a5fa}
+    .bench-row{display:flex;justify-content:space-between;padding:0.4rem 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:0.8rem}
+    .bench-row .name{color:#9ca3af} .bench-row .val{font-weight:600}
+    .config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:0.6rem;margin-bottom:1rem}
+    .cfg{background:rgba(15,20,30,0.4);border:1px solid rgba(255,255,255,0.05);border-radius:6px;padding:0.5rem 0.7rem}
+    .cfg .lbl{font-size:0.65rem;color:#6b7280} .cfg .v{color:#e2e8f0;font-weight:600;font-size:0.82rem}
+    .no-data{color:#6b7280;font-style:italic;font-size:0.8rem;text-align:center;padding:1.5rem}
+    .pred-box{background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.25);border-radius:8px;padding:1rem;margin-top:0.5rem}
+    .pred-box .dir{font-size:1.2rem;font-weight:700} .pred-box .det{font-size:0.78rem;color:#9ca3af;margin-top:0.3rem}
+  </style>
+</head>
+<body>
+  <div class="risk-banner">PAPER TRADING — No real money involved. Automated simulation for AI brain training.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon" style="background:linear-gradient(135deg,#059669,#0d9488)">₿</div><span>AI Paper Trading</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html" class="active" style="color:#34d399;background:rgba(16,185,129,0.12)">Paper Trade</a></li>
+      <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <div class="pt-header">
+      <h1>🤖 AI Paper Trading <span class="auto-badge">FULLY AUTOMATED</span></h1>
+      <div class="sub">Every confirmed God Mode signal auto-executes. 5 strategies compete. Shadow trades validate vetoes. All outcomes train the brain.</div>
+      <div class="sub">Capital: <span id="pt-budget">₹1,00,000</span> · Max/Trade: <span id="pt-maxtrade">₹20,000</span> · Started: <span id="pt-start">—</span> · Status: <span id="pt-status" class="green">ACTIVE</span></div>
+      <!-- Execution gate. This page reported trades and P&L but never showed whether
+           the kernel would actually allow a trade, so "why did nothing execute?" was
+           unanswerable from here. -->
+      <div id="pt-safety" class="sub" style="margin-top:0.4rem;padding:0.45rem 0.65rem;border-radius:7px;border:1px solid #1f2937;background:rgba(17,24,39,0.5);font-size:0.72rem">
+        <span class="muted">Checking execution gate…</span>
+      </div>
+      <div id="pt-executor" class="sub" style="margin-top:0.4rem;padding:0.45rem 0.65rem;border-radius:7px;border:1px solid rgba(245,158,11,0.4);background:rgba(245,158,11,0.06);font-size:0.72rem">
+        <span class="amber">Starting autonomous signal executor…</span>
+      </div>
+      <!-- The signal engine remains the single implementation of scanning and
+           execution. tool.html hosts it invisibly; proxy.php's lease guarantees
+           that multiple tabs/devices cannot duplicate a paper trade. -->
+      <iframe id="paper-executor-frame" title="Autonomous paper signal executor" src="signal.html?paper_executor=1&v=20260826-r11" hidden></iframe>
+    </div>
+
+    <!-- Stats -->
+    <div class="pt-stats">
+      <div class="pt-stat"><div class="label">Capital</div><div class="val green" id="s-cap">₹1,00,000</div></div>
+      <div class="pt-stat"><div class="label">Total P&L</div><div class="val" id="s-pnl">₹0</div></div>
+      <div class="pt-stat"><div class="label">Return</div><div class="val" id="s-ret">0%</div></div>
+      <div class="pt-stat"><div class="label">Trades</div><div class="val purple" id="s-trades">0</div></div>
+      <div class="pt-stat"><div class="label">Win Rate</div><div class="val" id="s-wr">—</div></div>
+      <div class="pt-stat"><div class="label">Sharpe</div><div class="val" id="s-sharpe">—</div></div>
+      <div class="pt-stat"><div class="label">Max DD</div><div class="val" id="s-dd">0%</div></div>
+      <div class="pt-stat"><div class="label">Active</div><div class="val amber" id="s-active">0</div></div>
+      <div class="pt-stat"><div class="label">Slippage</div><div class="val red" id="s-slip">₹0</div></div>
+      <div class="pt-stat"><div class="label">Avg Hold</div><div class="val" id="s-hold">—</div></div>
+    </div>
+
+    <!-- Equity Curve -->
+    <div class="section-title">📈 Equity Curve</div>
+    <div class="eq-chart"><svg id="eq-svg"></svg></div>
+
+    <!-- Active Positions -->
+    <div class="section-title">⚡ Active Positions <span class="auto-badge" id="active-n">0</span></div>
+    <div class="card" style="padding:0.3rem" id="active-box"><div class="no-data">No active positions. Waiting for next confirmed signal.</div></div>
+
+    <!-- Strategy Leaderboard -->
+    <div class="section-title">🏆 Strategy Leaderboard (5 competing)</div>
+    <div class="strat-board" id="strat-board"><div class="no-data">Strategies will populate after trades execute.</div></div>
+
+    <!-- Trade Log -->
+    <div class="section-title">📋 Trade Log</div>
+    <div class="card" style="padding:0">
+      <div class="trade-log">
+        <div class="t-row hdr"><span>Date</span><span>Dir</span><span>Instrument</span><span>Entry</span><span>Exit</span><span>P&L%</span><span>Strategy</span></div>
+        <div id="trade-rows"><div class="no-data">No completed trades yet.</div></div>
+      </div>
+    </div>
+
+    <!-- Shadow Trades -->
+    <div class="section-title">👻 Shadow Trades (Rejected Signals Tracked)</div>
+    <div class="card" style="padding:0.5rem">
+      <div id="shadow-stats" style="font-size:0.78rem;margin-bottom:0.5rem;color:#9ca3af"></div>
+      <div id="shadow-rows"><div class="no-data">Shadow trades appear when signals are rejected by vetoes. Tracks what WOULD have happened.</div></div>
+    </div>
+
+    <!-- What-If Insights -->
+    <div class="section-title">🔮 What-If Analysis</div>
+    <div class="card" id="whatif-box"><div class="no-data">What-if scenarios populate after trades close. Shows: wider stop better? Spread better? Different strike?</div></div>
+
+    <!-- Psychology -->
+    <div class="section-title">🧠 Psychological Profile</div>
+    <div id="psych-box"><div class="no-data">Needs 10+ trades to detect patterns (revenge trading, overconfidence, time bias).</div></div>
+
+    <!-- Performance by Regime / GEX -->
+    <div class="section-title">📊 Performance Breakdown</div>
+    <div class="card">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+        <div><div style="font-size:0.75rem;color:#6b7280;margin-bottom:0.4rem">BY REGIME</div><div id="by-regime"><span class="no-data">No data</span></div></div>
+        <div><div style="font-size:0.75rem;color:#6b7280;margin-bottom:0.4rem">BY GEX REGIME</div><div id="by-gex"><span class="no-data">No data</span></div></div>
+      </div>
+    </div>
+
+    <!-- Benchmarks -->
+    <div class="section-title">🏁 Benchmarks (vs. alternatives)</div>
+    <div class="card" id="bench-box"><div class="no-data">Benchmarks populate after first trades complete.</div></div>
+
+    <!-- Prediction -->
+    <div class="section-title">🔮 Next-Day Prediction</div>
+    <div id="pred-box"><div class="no-data">Generated at market close (3:30 PM). Shows tomorrow's expected direction and entry window.</div></div>
+
+    <!-- Config -->
+    <div class="section-title">⚙️ Configuration</div>
+    <div class="config-grid">
+      <div class="cfg"><div class="lbl">Initial Capital</div><div class="v">₹1,00,000</div></div>
+      <div class="cfg"><div class="lbl">Max Per Trade</div><div class="v">₹20,000</div></div>
+      <div class="cfg"><div class="lbl">Max Active</div><div class="v">3 positions</div></div>
+      <div class="cfg"><div class="lbl">Max Daily</div><div class="v">No fixed cap (quality gates apply)</div></div>
+      <div class="cfg"><div class="lbl">Auto-Execute</div><div class="v green">ON</div></div>
+      <div class="cfg"><div class="lbl">Slippage Model</div><div class="v">Spread + Impact + Delay</div></div>
+      <div class="cfg"><div class="lbl">Shadow Trading</div><div class="v green">ON (deduplicated rejects)</div></div>
+      <div class="cfg"><div class="lbl">Brain Training</div><div class="v purple">Every outcome → God Mode</div></div>
+    </div>
+
+    <div class="disclaimer"><strong>PAPER TRADING ONLY.</strong> No real money. Simulated to train the God Mode brain. Past performance ≠ future results.</div>
+  </main>
+
+  <script>
+    // Purge any paper-trading data left in browser storage by older builds.
+    // Nothing reads it any more (state is server-owned), but clearing it stops a
+    // stale copy from being resurrected by a cached script.
+    try {
+      ['ai_paper_v2','ai_paper_version','godmode_patterns','godmode_learnings',
+       'godmode_trades','godmode_version'].forEach(k => localStorage.removeItem(k));
+      // sessionStorage too: the last-signal handoff and the signal lock both
+      // moved into server state (god_state).
+      ['godmode_last_signal','sig_lock'].forEach(k => sessionStorage.removeItem(k));
+    } catch (e) {}
+  </script>
+  <script type="module">
+    import { paperTrader, STRATEGIES } from './js/paper-trading.js?v=4.5';
+    import { startBuildCheck } from './js/core/build-check.js?v=1.0';
+    startBuildCheck('2026-08-28-r13');
+
+    // ═══ SERVER IS THE ONLY SOURCE OF TRUTH ═══════════════════════════════════
+    // Previously render() (10s) painted these tiles from browser state while
+    // loadServerData() (30s) painted them from the server. The two disagreed — the
+    // server had 1 trade, the browser had 0 — so the numbers visibly flipped
+    // between ₹1,00,000/0 trades and ₹97,922/1 trade every few seconds.
+    // Now nothing reads browser storage: one fetch cycle, one writer (render).
+    let _rpt = null, _trades = null, _state = null, _shadow = null, _safety = null, _lease = null;
+
+    function shadowStatsFromState(state) {
+      const shadows = Array.isArray(state?.shadows) ? state.shadows : [];
+      const completed = shadows.filter(s => s.wouldHaveWon !== null && s.wouldHaveWon !== undefined);
+      const winners = completed.filter(s => s.wouldHaveWon === true);
+      const byReason = {};
+      for (const s of completed) {
+        const reason = s.reason || 'Unknown';
+        if (!byReason[reason]) byReason[reason] = { total: 0, correct: 0, wrong: 0 };
+        byReason[reason].total++;
+        if (s.wouldHaveWon) byReason[reason].wrong++; else byReason[reason].correct++;
+      }
+      return {
+        total: shadows.length, completed: completed.length,
+        wouldHaveWon: winners.length, wouldHaveLost: completed.length - winners.length,
+        vetoAccuracy: completed.length ? Math.round((completed.length - winners.length) / completed.length * 100) : 0,
+        missedProfitAvg: winners.length ? Math.round(winners.reduce((n, s) => n + Number(s.missedPnlPct || 0), 0) / winners.length) : 0,
+        byReason,
+      };
+    }
+
+    function _stdev(a) {
+      if (a.length < 2) return 0;
+      const m = a.reduce((x, y) => x + y, 0) / a.length;
+      return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / (a.length - 1));
+    }
+
+    /** Single view model assembled from server responses only. */
+    function serverView() {
+      const rpt = _rpt || {};
+      const s = _state || {};
+      const base = rpt.initialCapital || s.initialCapital || 100000;
+      // Normalise trade field names. The server writes entry/exit/outcome/strategy/ts;
+      // the markup below was written against the old client shape
+      // (entryPremium/exitPremium/status/strategyName/exitDate). Without this the
+      // trade log threw on t.entryPremium.toFixed() every render and every section
+      // after it stopped updating.
+      const trades = (_trades || s.trades || []).map(t => {
+        const iso = t.ts ? new Date(t.ts * 1000).toISOString() : null;
+        return Object.assign({}, t, {
+          entryPremium: t.entryPremium != null ? t.entryPremium : (t.entry || 0),
+          exitPremium:  t.exitPremium  != null ? t.exitPremium  : (t.exit  || 0),
+          status:       t.status       || t.outcome  || '',
+          strategyName: t.strategyName || t.strategy || '',
+          exitDate:     t.exitDate     || iso,
+          openDate:     t.openDate     || iso,
+          direction:    t.direction || '',
+          instrument:   t.instrument || '',
+          strike:       t.strike != null ? t.strike : '',
+          type:         t.type || '',
+          pnlPct:       Math.round(t.pnlPct || 0),
+        });
+      }).slice(-30).reverse(); // newest first
+      const active = Array.isArray(s.active) ? s.active : [];
+      const holds = trades.map(t => t.holdMinutes).filter(x => typeof x === 'number');
+      const rets = trades.map(t => t.pnlPct).filter(x => typeof x === 'number');
+      const sd = _stdev(rets);
+      return {
+        initialCapital: base,
+        capital: rpt.capital != null ? rpt.capital : (s.capital != null ? s.capital : base),
+        totalPnl: rpt.totalPnl != null ? rpt.totalPnl : 0,
+        returnPct: rpt.returnPct != null ? rpt.returnPct : 0,
+        totalTrades: rpt.totalTrades != null ? rpt.totalTrades : trades.length,
+        winRate: rpt.winRate != null ? rpt.winRate : 0,
+        maxDrawdown: rpt.maxDrawdownPct != null ? rpt.maxDrawdownPct : 0,
+        totalSlippage: rpt.totalSlippage != null ? Math.round(rpt.totalSlippage) : 0,
+        equityCurve: (rpt.equityCurve && rpt.equityCurve.length >= 2) ? rpt.equityCurve : [],
+        active, activeCount: active.length,
+        avgHoldMinutes: holds.length ? Math.round(holds.reduce((a, b) => a + b, 0) / holds.length) : 0,
+        // Sharpe needs dispersion; with <2 closed trades it is not defined, so show '—'
+        // rather than a fabricated number.
+        sharpe: (rets.length >= 2 && sd > 0)
+          ? Math.round((rets.reduce((a, b) => a + b, 0) / rets.length) / sd * 100) / 100
+          : null,
+        startDate: s.startDate || '—',
+        trades,
+
+        // ── Fields render() also needs. These MUST be defined (several are read
+        //    without a null guard, e.g. shadowStats.completed and byRegime keys),
+        //    otherwise render() throws partway through and every section below the
+        //    throw silently stops updating.
+        strategyLeaderboard: Object.entries(rpt.byStrategy || {}).map(([name, d]) => {
+          const key = Object.keys(STRATEGIES).find(k => STRATEGIES[k].name === name) || name;
+          return {
+            key, name,
+            trades: d.trades || 0,
+            winRate: d.winRate || 0,
+            pnl: Math.round(d.pnl || 0),
+            avgPnl: d.trades ? Math.round((d.pnl || 0) / d.trades) : 0,
+          };
+        }),
+        byRegime: rpt.byRegime || {},
+        byGex: rpt.byGex || {},
+        shadowStats: _shadow || { completed: 0, wouldHaveWon: 0, wouldHaveLost: 0, vetoAccuracy: 0, missedProfitAvg: 0, byReason: {} },
+        benchmarks: s.benchmarks || null,
+        prediction: s.prediction || null,
+        psychInsights: Array.isArray(s.psychInsights) ? s.psychInsights : [],
+        whatIfInsights: s.whatIfInsights || null,
+      };
+    }
+
+    function render() {
+      const st = serverView();
+
+      // ── Execution gate strip ──
+      (function gate() {
+        const el = document.getElementById('pt-safety');
+        if (!el) return;
+        if (!_safety) { el.innerHTML = '<span class="muted">Execution gate unavailable.</span>'; return; }
+        const s = _safety.s, lim = _safety.limits || {}, integ = _safety.integrity || {};
+        const ok = s.executionAllowed;
+        el.style.borderColor = ok ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.45)';
+        el.style.background  = ok ? 'rgba(16,185,129,0.07)' : 'rgba(239,68,68,0.07)';
+        let h = `<b class="${ok?'green':'red'}">${ok ? '● EXECUTION PERMITTED' : '■ EXECUTION BLOCKED'}</b>`
+              + ` <span class="muted">safety state</span> <b>${s.state}</b>`;
+        if (!ok) h += ` <span class="muted">— ${s.reason || 'no reason recorded'}</span>`;
+        if (integ.clean === false && (integ.findings || []).length) {
+          h += `<br><span class="red">state integrity: ${integ.findings.map(f=>f.code).join(', ')}</span>`
+             + ` <span class="muted">— run the recovery cycle on the God Mode dashboard</span>`;
+        }
+        h += `<br><span class="muted">guardrails:</span>`
+          + ` <span class="muted">no duplicate intent for</span> <b>${lim.dupWindowSec ?? '—'}s</b>`
+          + ` <span class="muted">· price must be under</span> <b>${lim.priceMaxAgeSec ?? '—'}s</b> <span class="muted">old</span>`
+          + ` <span class="muted">· max</span> <b>${lim.maxOpenPositions ?? '—'}</b> <span class="muted">open</span>`
+          + ` <span class="muted">· retry cap</span> <b>${lim.maxRetries ?? '—'}</b>`;
+        el.innerHTML = h;
+      })();
+
+      // ── Autonomous executor lease + last decision ──
+      (function executorStatus() {
+        const el = document.getElementById('pt-executor');
+        if (!el) return;
+        const lease = _lease?.lease;
+        const active = !!(_lease?.active && lease);
+        const last = _state?.lastExecution;
+        el.style.borderColor = active ? 'rgba(16,185,129,0.45)' : 'rgba(245,158,11,0.45)';
+        el.style.background = active ? 'rgba(16,185,129,0.07)' : 'rgba(245,158,11,0.07)';
+        const safe = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        let h = `<b class="${active?'green':'amber'}">${active?'● AUTONOMOUS EXECUTOR ACTIVE':'● EXECUTOR LEASE PENDING'}</b>`;
+        if (active) h += ` <span class="muted">— ${safe(lease.role || 'signal')} heartbeat ${new Date((lease.heartbeatAt || 0)*1000).toLocaleTimeString('en-IN')}</span>`;
+        if (last) {
+          h += `<br><span class="muted">Last decision:</span> <b class="${last.executed?'green':'amber'}">${last.executed?'EXECUTED':'NOT OPENED'}</b>`
+             + ` <span>${safe(last.instrument || '')} ${safe(last.direction || '')}</span>`
+             + ` <span class="muted">— ${safe(last.reason || 'no reason')}</span>`
+             + ` <span class="muted">(${new Date(last.timestamp).toLocaleTimeString('en-IN')})</span>`;
+        } else {
+          h += '<br><span class="muted">No execution decision recorded yet. The executor will publish an explicit reason after its first scan.</span>';
+        }
+        el.innerHTML = h;
+        document.getElementById('pt-status').textContent = active ? 'SCANNING' : 'WAITING FOR LEASE';
+        document.getElementById('pt-status').className = active ? 'green' : 'amber';
+      })();
+
+      // ── Budget labels come from the same payload as the tiles, so the header
+      //    can never disagree with them.
+      document.getElementById('pt-budget').textContent = '₹' + st.initialCapital.toLocaleString('en-IN');
+      if (_rpt && _rpt.maxPerTrade) {
+        document.getElementById('pt-maxtrade').textContent = '₹' + _rpt.maxPerTrade.toLocaleString('en-IN');
+      } else if (_state && _state.maxPerTrade) {
+        document.getElementById('pt-maxtrade').textContent = '₹' + _state.maxPerTrade.toLocaleString('en-IN');
+      }
+
+      // ── Stats ──
+      document.getElementById('s-cap').textContent = '₹' + Math.round(st.capital).toLocaleString('en-IN');
+      // Compare against the actual starting budget, not a leftover ₹20,000 literal
+      // (that stale threshold painted a healthy ₹97,922 balance as a loss).
+      document.getElementById('s-cap').className = 'val ' + (st.capital >= (st.initialCapital || 100000) ? 'green' : 'red');
+      document.getElementById('s-pnl').textContent = (st.totalPnl >= 0 ? '+₹' : '-₹') + Math.abs(Math.round(st.totalPnl)).toLocaleString('en-IN');
+      document.getElementById('s-pnl').className = 'val ' + (st.totalPnl >= 0 ? 'green' : 'red');
+      document.getElementById('s-ret').textContent = (st.returnPct >= 0 ? '+' : '') + st.returnPct + '%';
+      document.getElementById('s-ret').className = 'val ' + (st.returnPct >= 0 ? 'green' : 'red');
+      document.getElementById('s-trades').textContent = st.totalTrades;
+      document.getElementById('s-wr').textContent = st.totalTrades ? st.winRate + '%' : '—';
+      document.getElementById('s-wr').className = 'val ' + (st.winRate >= 55 ? 'green' : st.winRate > 0 ? 'red' : '');
+      document.getElementById('s-sharpe').textContent = (st.sharpe != null) ? st.sharpe : '—';
+      document.getElementById('s-sharpe').className = 'val ' + (st.sharpe > 1 ? 'green' : st.sharpe > 0 ? 'amber' : st.sharpe < 0 ? 'red' : '');
+      document.getElementById('s-dd').textContent = st.maxDrawdown + '%';
+      document.getElementById('s-dd').className = 'val ' + (st.maxDrawdown > 15 ? 'red' : st.maxDrawdown > 5 ? 'amber' : 'green');
+      document.getElementById('s-active').textContent = st.activeCount;
+      document.getElementById('s-slip').textContent = '₹' + st.totalSlippage;
+      document.getElementById('s-hold').textContent = st.avgHoldMinutes ? st.avgHoldMinutes + 'min' : '—';
+      document.getElementById('pt-start').textContent = st.startDate;
+      document.getElementById('active-n').textContent = st.activeCount + ' OPEN';
+
+      // ── Equity Curve ──
+      if (st.equityCurve.length >= 2) {
+        const svg = document.getElementById('eq-svg');
+        const w = svg.clientWidth || 700, h = svg.clientHeight || 100;
+        const vals = st.equityCurve.map(c => c.equity);
+        const mn = Math.min(...vals) * 0.98, mx = Math.max(...vals) * 1.02, rng = mx - mn || 1;
+        const pts = st.equityCurve.map((c, i) => `${(i/(st.equityCurve.length-1))*w},${h-((c.equity-mn)/rng)*(h-15)-8}`).join(' ');
+        svg.innerHTML = `<defs><linearGradient id="eg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(16,185,129,0.25)"/><stop offset="100%" stop-color="rgba(16,185,129,0)"/></linearGradient></defs><polyline fill="url(#eg)" points="${pts} ${w},${h} 0,${h}"/><polyline fill="none" stroke="#34d399" stroke-width="1.5" points="${pts}"/>`;
+      }
+
+      // ── Active Positions (detailed with Buy/Current labels, stop, targets, time) ──
+      const actBox = document.getElementById('active-box');
+      if (st.active.length) {
+        let h = '';
+        for (const p of st.active) {
+          const pnlPct = p.cost > 0 ? Math.round((p.currentPremium - p.entryPremium) / p.entryPremium * 100) : 0;
+          const pnlAmt = Math.round((p.currentPremium - p.entryPremium) * p.lotSize * (p.sizeMultiplier || 1));
+          const elapsed = Math.round((Date.now() - new Date(p.openDate).getTime()) / 60000);
+          const elapsedStr = elapsed >= 60 ? Math.floor(elapsed/60) + 'h ' + (elapsed%60) + 'm' : elapsed + ' min';
+          const stopDist = p.entryPremium > 0 ? Math.round((p.stopPremium - p.entryPremium) / p.entryPremium * 100) : 0;
+
+          h += `<div style="background:rgba(${pnlPct>=0?'16,185,129':'239,68,68'},0.06);border:1px solid rgba(${pnlPct>=0?'16,185,129':'239,68,68'},0.2);border-radius:10px;padding:1rem;margin:0.5rem 0">`;
+          // Header row
+          h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.7rem">`;
+          h += `<div style="display:flex;align-items:center;gap:0.6rem"><span class="badge ${p.direction.toLowerCase()}" style="font-size:0.8rem;padding:0.25rem 0.6rem">${p.direction}</span><span style="font-weight:700;font-size:1rem;color:#e2e8f0">${p.instrument} ${p.strike} ${p.type}</span>${p.expiry ? '<span style="font-size:0.7rem;color:#6b7280">Exp: '+p.expiry+'</span>' : ''}</div>`;
+          h += `<div style="text-align:right"><div style="font-size:1.3rem;font-weight:700;color:${pnlPct>=0?'#34d399':'#f87171'}">${pnlPct>=0?'+':''}${pnlPct}% <span style="font-size:0.8rem">(${pnlAmt>=0?'+':''}₹${pnlAmt})</span></div><div style="font-size:0.7rem;color:#6b7280">${elapsedStr} in trade</div></div>`;
+          h += `</div>`;
+          // Details grid
+          h += `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:0.5rem;font-size:0.78rem">`;
+          // ENTRY is fixed the moment the trade is taken and NEVER changes. It was
+          // labelled "Buy Price" — indistinguishable at a glance from the live price
+          // beside it, which is the one that actually moves. The distinction is now
+          // explicit: entry stamped FIXED with the fill time, live cell stamped LIVE.
+          // (On a SELL signal the system buys a PUT to express the bearish view, so
+          // the "buy" price IS the entry — labelled so.)
+          const _entryTime = new Date(p.openDate).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem;border:1px solid rgba(148,163,184,0.18)"><div style="color:#93a4bd;font-size:0.65rem;text-transform:uppercase">Entry price · FIXED</div><div style="color:#e2e8f0;font-weight:700;font-size:1rem">₹${p.entryPremium.toFixed(2)}</div><div style="color:#6b7280;font-size:0.6rem">bought ${p.type||'opt'} @ ${_entryTime} — does not change</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Live price · MOVES</div><div style="color:${pnlPct>=0?'#34d399':'#f87171'};font-weight:700;font-size:1rem">₹${(p.currentPremium||p.entryPremium).toFixed(2)}</div><div style="color:#6b7280;font-size:0.6rem">refreshes every 15s</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Stop Loss</div><div style="color:#f87171;font-weight:600">₹${p.stopPremium.toFixed(2)} <span style="font-size:0.65rem">(${stopDist}%)</span></div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Target 1</div><div style="color:#34d399;font-weight:600">₹${p.t1Premium.toFixed(2)} ${p.t1Hit?'✓ HIT':''}</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Target 2</div><div style="color:#34d399;font-weight:600">₹${p.t2Premium.toFixed(2)}</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Lot Size</div><div style="color:#e2e8f0;font-weight:600">${p.lotSize} × 1 lot</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Cost</div><div style="color:#e2e8f0;font-weight:600">₹${Math.round(p.cost).toLocaleString('en-IN')}</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Strategy</div><div style="color:#a78bfa;font-weight:600">${p.strategyName || 'Aggressive'}</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Profit Booking</div><div style="color:#34d399;font-weight:600">${p.exitTarget || ((p.confidence||0)>=80?'T2':'T1')}</div><div style="color:#6b7280;font-size:0.6rem">T2 only at 80%+ confidence</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Confidence</div><div style="color:#fbbf24;font-weight:600">${Math.round(p.confidence || 0)}%</div></div>`;
+          h += `<div style="background:rgba(0,0,0,0.2);border-radius:6px;padding:0.5rem"><div style="color:#6b7280;font-size:0.65rem;text-transform:uppercase">Regime</div><div style="color:#e2e8f0;font-weight:600">${p.regime || '—'}</div></div>`;
+          h += `</div>`;
+          // Status bar
+          h += `<div style="margin-top:0.6rem;display:flex;gap:0.5rem;font-size:0.7rem;color:#9ca3af">`;
+          h += `<span>Entry: ${new Date(p.openDate).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} IST</span>`;
+          h += `<span>·</span><span>Slippage: ₹${(p.slippage||0).toFixed(2)}</span>`;
+          if (p.breakevenActive) h += `<span>·</span><span style="color:#34d399;font-weight:700">🛡️ BREAKEVEN ACTIVE (Zero Loss)</span>`;
+          if (p.t1Hit) h += `<span>·</span><span style="color:#34d399">T1 ✓</span>`;
+          h += `</div>`;
+          h += `</div>`;
+        }
+        actBox.innerHTML = h;
+      } else actBox.innerHTML = '<div class="no-data">No active positions. Waiting for next confirmed signal.</div>';
+
+      // ── Strategy Leaderboard ──
+      const lb = st.strategyLeaderboard;
+      const lbBox = document.getElementById('strat-board');
+      if (lb.length) {
+        let h = '';
+        for (const s of lb) {
+          h += `<div class="strat-card"><h4>${s.name}</h4><div class="sr">Trades: <span>${s.trades}</span> · WR: <span class="${s.winRate>=55?'green':'red'}">${s.winRate}%</span></div><div class="sr">P&L: <span class="${s.pnl>=0?'green':'red'}">${s.pnl>=0?'+':''}₹${s.pnl}</span> · Avg: <span>${s.avgPnl>=0?'+':''}₹${s.avgPnl}</span></div></div>`;
+        }
+        // Also show unused strategies
+        for (const [key, strat] of Object.entries(STRATEGIES)) {
+          if (!lb.find(l => l.key === key)) {
+            h += `<div class="strat-card" style="opacity:0.5"><h4>${strat.name}</h4><div class="sr">${strat.description}</div><div class="sr" style="color:#6b7280">Waiting for qualifying signal...</div></div>`;
+          }
+        }
+        lbBox.innerHTML = h;
+      } else {
+        let h = '';
+        for (const [key, strat] of Object.entries(STRATEGIES)) {
+          h += `<div class="strat-card"><h4>${strat.name}</h4><div class="sr">${strat.description}</div><div class="sr" style="color:#6b7280">Min conf: ${strat.minConfidence}%${strat.regimeFilter ? ' · ' + strat.regimeFilter : ''}${strat.gexFilter ? ' · ' + strat.gexFilter : ''}</div></div>`;
+        }
+        lbBox.innerHTML = h;
+      }
+
+      // ── Trade Log ──
+      const trBox = document.getElementById('trade-rows');
+      if (st.trades.length) {
+        let h = '';
+        for (const t of st.trades) {
+          const isWin = t.pnl > 0;
+          const dt = new Date(t.exitDate || t.openDate).toLocaleDateString('en-IN', { day:'2-digit', month:'short' });
+          h += `<div class="t-row"><span>${dt}</span><span><span class="badge ${t.direction.toLowerCase()}">${t.direction}</span></span><span>${t.instrument} ${t.strike} ${t.type} <span class="badge ${isWin?'win':'loss'}">${t.status}</span></span><span>₹${t.entryPremium.toFixed(1)}</span><span>₹${(t.exitPremium||0).toFixed(1)}</span><span style="color:${isWin?'#34d399':'#f87171'};font-weight:700">${(t.pnlPct||0)>=0?'+':''}${t.pnlPct||0}%</span><span style="font-size:0.65rem;color:#9ca3af">${t.strategyName||''}</span></div>`;
+        }
+        trBox.innerHTML = h;
+      }
+
+      // ── Shadow Trades ──
+      const shStats = st.shadowStats;
+      if (shStats.completed > 0) {
+        document.getElementById('shadow-stats').innerHTML = `<span class="green">${shStats.wouldHaveWon} would have WON</span> · <span class="red">${shStats.wouldHaveLost} would have LOST</span> · Veto accuracy: <span class="${shStats.vetoAccuracy>=60?'green':'red'}">${shStats.vetoAccuracy}%</span> · Avg missed: <span class="amber">+${shStats.missedProfitAvg}%</span>`;
+        // Show by-reason breakdown
+        if (shStats.byReason && Object.keys(shStats.byReason).length) {
+          let h = '';
+          for (const [reason, data] of Object.entries(shStats.byReason)) {
+            const acc = data.total ? Math.round(data.correct / data.total * 100) : 0;
+            h += `<div class="shadow-row"><span>${acc}%</span><span class="${acc>=60?'green':'red'}">${acc>=60?'✓':'✗'}</span><span>${reason}</span><span>${data.correct}/${data.total} correct</span><span>${data.wrong} missed</span></div>`;
+          }
+          document.getElementById('shadow-rows').innerHTML = h;
+        }
+      }
+
+      // ── What-If ──
+      const wi = st.whatIfInsights;
+      if (wi) {
+        document.getElementById('whatif-box').innerHTML = `<div style="font-size:0.82rem"><div style="margin-bottom:0.5rem;color:#a78bfa;font-weight:600">Recommendation: ${wi.recommendation}</div><div class="sr" style="color:#9ca3af">Based on ${wi.totalResolved} resolved trades: Wider stop better ${wi.widerStopPct}% of the time (${wi.widerStopBetter} trades).</div></div>`;
+      }
+
+      // ── Psychology ──
+      const pi = st.psychInsights;
+      if (pi && pi.length) {
+        let h = '';
+        for (const ins of pi) {
+          h += `<div class="insight-card ${ins.severity.toLowerCase()}"><div style="font-weight:700;margin-bottom:0.2rem">${ins.type}</div><div>${ins.finding}</div><div style="color:#60a5fa;margin-top:0.2rem">→ ${ins.recommendation}</div></div>`;
+        }
+        document.getElementById('psych-box').innerHTML = h;
+      }
+
+      // ── By Regime / GEX ──
+      if (Object.keys(st.byRegime).length) {
+        let h = '';
+        for (const [r, d] of Object.entries(st.byRegime)) {
+          const wr = d.trades ? Math.round(d.wins / d.trades * 100) : 0;
+          h += `<div class="bench-row"><span class="name">${r}</span><span class="val ${wr>=55?'green':'red'}">${wr}% WR (${d.trades})</span></div>`;
+        }
+        document.getElementById('by-regime').innerHTML = h;
+      }
+      if (Object.keys(st.byGex).length) {
+        let h = '';
+        for (const [g, d] of Object.entries(st.byGex)) {
+          const wr = d.trades ? Math.round(d.wins / d.trades * 100) : 0;
+          h += `<div class="bench-row"><span class="name">${g}</span><span class="val ${wr>=55?'green':'red'}">${wr}% WR (${d.trades})</span></div>`;
+        }
+        document.getElementById('by-gex').innerHTML = h;
+      }
+
+      // ── Benchmarks ──
+      const bench = st.benchmarks;
+      if (bench && bench.system) {
+        let h = '';
+        h += `<div class="bench-row"><span class="name">${bench.system.label}</span><span class="val ${bench.system.returnPct>=0?'green':'red'}">${bench.system.returnPct>=0?'+':''}${bench.system.returnPct}%</span></div>`;
+        h += `<div class="bench-row"><span class="name">${bench.buyHold.label}</span><span class="val">${bench.buyHold.returnPct>=0?'+':''}${bench.buyHold.returnPct}%</span></div>`;
+        if (bench.blindSignals.returnPct !== 0) h += `<div class="bench-row"><span class="name">${bench.blindSignals.label}</span><span class="val">${bench.blindSignals.returnPct>=0?'+':''}${bench.blindSignals.returnPct}% (${bench.blindSignals.winRate}% WR)</span></div>`;
+        if (bench.onlyHigh.returnPct !== 0) h += `<div class="bench-row"><span class="name">${bench.onlyHigh.label}</span><span class="val">${bench.onlyHigh.returnPct>=0?'+':''}${bench.onlyHigh.returnPct}% (${bench.onlyHigh.winRate}% WR)</span></div>`;
+        if (bench.alpha) h += `<div class="bench-row" style="border-top:1px solid rgba(139,92,246,0.3);margin-top:0.3rem;padding-top:0.4rem"><span class="name" style="color:#a78bfa;font-weight:700">Alpha (vs NIFTY)</span><span class="val ${bench.alpha>=0?'green':'red'}">${bench.alpha>=0?'+':''}${bench.alpha}%</span></div>`;
+        document.getElementById('bench-box').innerHTML = h;
+      }
+
+      // ── Prediction ──
+      const pred = st.prediction;
+      if (pred) {
+        const col = pred.direction === 'BULLISH' ? '#34d399' : pred.direction === 'BEARISH' ? '#f87171' : '#9ca3af';
+        document.getElementById('pred-box').innerHTML = `<div class="pred-box"><div class="dir" style="color:${col}">${pred.direction}</div><div class="det amber">Unvalidated model bias — no empirical next-day probability is claimed yet.</div><div class="det">${pred.gexNote}</div><div class="det">${pred.htfNote}</div><div class="det">Entry window: ${pred.entryWindow}</div><div class="det" style="margin-top:0.3rem;color:#6b7280">Generated: ${new Date(pred.generatedAt).toLocaleString('en-IN')}</div></div>`;
+      }
+    }
+
+    // Market status
+    (function ms(){const i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));const d=i.getDay(),t=i.getHours()*60+i.getMinutes();const e=document.getElementById('mkt-t'),b=document.getElementById('mkt');if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';}else if(t>=555&&t<=930){e.textContent='OPEN';b.className='market-status-badge open';}else{e.textContent='CLOSED';b.className='market-status-badge closed';}setTimeout(ms,30000);})();
+
+    // Make paper trader accessible for signal.html
+    window._paperTrader = paperTrader;
+
+    // Load server-side data (works in ALL browsers/devices)
+    async function loadServerData() {
+      // PURE FETCH — this function must not touch the DOM. It used to also render
+      // the tiles, leaderboard, trade log and equity curve, which meant two
+      // functions on two timers wrote the same elements from two different
+      // sources. render() is the only writer now.
+      const bust = '&cb=' + Date.now();
+      const noStore = { cache: 'no-store' };
+
+      const [rptRes, stRes, trRes, leaseRes] = await Promise.allSettled([
+        fetch('/signals/api/proxy.php?action=paper_report' + bust, noStore).then(r => r.json()),
+        fetch('/signals/api/proxy.php?action=paper_state' + bust, noStore).then(r => r.json()),
+        fetch('/signals/api/proxy.php?action=paper_trades' + bust, noStore).then(r => r.json()),
+        fetch('/signals/api/proxy.php?action=paper_lease' + bust, noStore).then(r => r.json()),
+      ]);
+
+      if (rptRes.status === 'fulfilled' && rptRes.value?.status && rptRes.value.report) _rpt = rptRes.value.report;
+
+      // Execution gate + active guardrails, so this page can explain a quiet book.
+      try {
+        const sf = await (await fetch('/signals/api/proxy.php?action=safety_state' + bust, noStore)).json();
+        if (sf && sf.safety) _safety = { s: sf.safety, integrity: sf.integrity, limits: sf.limits };
+      } catch (e) {}
+      if (stRes.status === 'fulfilled' && stRes.value?.status && stRes.value.state) {
+        _state = stRes.value.state;
+        _shadow = shadowStatsFromState(_state);
+      }
+      if (trRes.status === 'fulfilled' && trRes.value?.status && Array.isArray(trRes.value.trades)) _trades = trRes.value.trades;
+      if (leaseRes.status === 'fulfilled' && leaseRes.value?.status) _lease = leaseRes.value;
+    }
+
+    // ONE refresh cycle, ONE writer. The old code ran render() on a 10s timer and
+    // loadServerData() on a 30s timer, and both wrote the same tiles from two
+    // different sources — that is what made the numbers jump every few seconds.
+    // Now: fetch from the server, then render. Nothing else touches these tiles.
+    async function refresh() {
+      await loadServerData();
+      render();
+    }
+    refresh();
+    setInterval(refresh, 10000); // 10s, as requested
+  </script>
+</body>
+</html>

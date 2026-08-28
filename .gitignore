@@ -1,0 +1,18 @@
+# Secrets and runtime state
+**/config.secret.php
+brain-data/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+*.temp
+*~
+
+# OS and editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

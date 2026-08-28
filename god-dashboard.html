@@ -1,0 +1,752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>God Mode — Control Plane</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    :root { --gm-bd:#1f2937; --gm-bg:#0d1420; }
+    .gm-grid { display:grid; gap:0.9rem; }
+    @media(min-width:1100px){ .gm-2{grid-template-columns:1fr 1fr} .gm-3{grid-template-columns:repeat(3,1fr)} }
+    .gm-card { background:var(--gm-bg); border:1px solid var(--gm-bd); border-radius:11px; padding:0.9rem 1rem; }
+    .gm-card h3 { font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em; color:#93a4bd;
+      margin:0 0 0.7rem; display:flex; align-items:center; gap:0.5rem; justify-content:space-between; }
+    .kv { display:flex; justify-content:space-between; gap:0.6rem; padding:0.3rem 0;
+      border-bottom:1px dashed rgba(31,41,55,0.7); font-size:0.8rem; }
+    .kv:last-child{border-bottom:none}
+    .kv .k { color:#8b98ad; } .kv .v { font-weight:700; font-variant-numeric:tabular-nums; }
+
+    /* Safety pipeline */
+    .pipe { display:flex; align-items:center; gap:0; flex-wrap:wrap; margin:0.3rem 0 0.8rem; }
+    .step { flex:1; min-width:82px; text-align:center; padding:0.42rem 0.2rem; font-size:0.62rem;
+      font-weight:700; letter-spacing:0.04em; border:1px solid var(--gm-bd); color:#5b6779;
+      background:rgba(31,41,55,0.25); position:relative; }
+    .step:first-child{border-radius:7px 0 0 7px} .step:last-child{border-radius:0 7px 7px 0}
+    .step.done { color:#34d399; border-color:rgba(52,211,153,0.45); background:rgba(16,185,129,0.10); }
+    .step.at   { color:#0a0e17; background:#f59e0b; border-color:#f59e0b; }
+    .step.bad  { color:#fff; background:#ef4444; border-color:#ef4444; }
+    .badge-lg { font-size:0.95rem; font-weight:800; padding:0.35rem 0.8rem; border-radius:7px; }
+    .finding { font-size:0.72rem; padding:0.42rem 0.6rem; border-radius:6px; margin-top:0.35rem;
+      background:rgba(239,68,68,0.09); border:1px solid rgba(239,68,68,0.3); }
+    .finding.high { background:rgba(245,158,11,0.09); border-color:rgba(245,158,11,0.3); }
+    .btn { font-size:0.72rem; font-weight:700; padding:0.42rem 0.8rem; border-radius:7px; cursor:pointer;
+      border:1px solid var(--gm-bd); background:rgba(31,41,55,0.5); color:#cbd5e1; }
+    .btn:hover{ border-color:#60a5fa; color:#fff }
+    .btn.warn { border-color:rgba(239,68,68,0.5); color:#fca5a5 }
+    .btn.go   { border-color:rgba(52,211,153,0.5); color:#6ee7b7 }
+    .btn:disabled{ opacity:0.4; cursor:not-allowed }
+
+    table.gm { width:100%; border-collapse:collapse; font-size:0.72rem; font-variant-numeric:tabular-nums; }
+    table.gm th { text-align:right; color:#8b98ad; font-weight:600; padding:0.3rem 0.35rem;
+      border-bottom:1px solid var(--gm-bd); font-size:0.64rem; text-transform:uppercase; }
+    table.gm th:first-child, table.gm td:first-child { text-align:left; }
+    table.gm td { text-align:right; padding:0.28rem 0.35rem; border-bottom:1px solid rgba(31,41,55,0.4); }
+    tr.atm td { background:rgba(96,165,250,0.10); font-weight:700; }
+
+    .chip { display:inline-block; font-size:0.6rem; padding:0.14rem 0.42rem; border-radius:999px;
+      border:1px solid var(--gm-bd); color:#9ca3af; margin:0.1rem 0.15rem 0.1rem 0; }
+    .chip.r-none{border-color:rgba(52,211,153,.4);color:#6ee7b7}
+    .chip.r-low{border-color:rgba(96,165,250,.4);color:#93c5fd}
+    .chip.r-medium{border-color:rgba(245,158,11,.4);color:#fcd34d}
+    .chip.r-high{border-color:rgba(239,68,68,.4);color:#fca5a5}
+    .skill { border:1px solid var(--gm-bd); border-radius:8px; padding:0.5rem 0.6rem; margin-bottom:0.4rem; }
+    .skill.blocked { opacity:0.55; border-style:dashed; }
+    .skill .nm { font-family:ui-monospace,monospace; font-size:0.72rem; color:#e5e7eb; font-weight:700 }
+    .skill .ds { font-size:0.67rem; color:#8b98ad; margin:0.15rem 0 0.3rem }
+
+    .aud { font-family:ui-monospace,monospace; font-size:0.63rem; padding:0.2rem 0.4rem;
+      border-left:2px solid var(--gm-bd); margin-bottom:0.12rem; color:#9ca3af; }
+    .aud.security{border-color:#ef4444} .aud.safety{border-color:#f59e0b}
+    .aud.risk{border-color:#a78bfa} .aud.recovery{border-color:#34d399}
+    .aud.order{border-color:#60a5fa} .aud b{color:#e5e7eb}
+
+    /* Copilot */
+    .cop { position:fixed; right:1rem; bottom:1rem; width:min(410px,92vw); z-index:70;
+      background:#0b1220; border:1px solid #2b3a52; border-radius:13px; box-shadow:0 18px 50px rgba(0,0,0,.6); }
+    .cop-h { padding:0.6rem 0.8rem; border-bottom:1px solid var(--gm-bd); display:flex;
+      justify-content:space-between; align-items:center; cursor:pointer; }
+    .cop-b { max-height:min(52vh,420px); overflow-y:auto; padding:0.7rem 0.8rem; font-size:0.76rem; }
+    .cop-f { padding:0.55rem 0.7rem; border-top:1px solid var(--gm-bd); display:flex; gap:0.4rem; }
+    .cop-f input { flex:1; background:#0a0e17; border:1px solid var(--gm-bd); border-radius:7px;
+      padding:0.42rem 0.6rem; color:#e5e7eb; font-size:0.74rem; }
+    .ctxpill { font-size:0.6rem; color:#93c5fd; background:rgba(96,165,250,0.12);
+      border:1px solid rgba(96,165,250,0.3); border-radius:999px; padding:0.1rem 0.45rem; }
+    .msg { margin-bottom:0.6rem; }
+    .msg.u { color:#93c5fd } .msg.a { color:#d1d5db; white-space:pre-wrap; line-height:1.45 }
+    .cop.min .cop-b, .cop.min .cop-f { display:none }
+    .muted { color:#6b7280; font-size:0.68rem }
+  </style>
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">F</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Paper Trade</a></li>
+      <li><a href="god-dashboard.html" class="active" style="color:var(--primary);background:var(--primary-dim)">God Mode</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container" style="padding-bottom:8rem">
+
+    <!-- ══ 1. SAFETY & CONTROL ══ -->
+    <section class="gm-card" style="border-color:rgba(245,158,11,0.35)">
+      <h3>
+        <span>Safety &amp; Control Plane</span>
+        <span id="sf-badge" class="badge-lg" style="background:#374151;color:#e5e7eb">…</span>
+      </h3>
+      <div class="pipe" id="sf-pipe"></div>
+      <div class="gm-grid gm-2">
+        <div>
+          <div class="kv"><span class="k">Execution permitted</span><span class="v" id="sf-exec">…</span></div>
+          <div class="kv"><span class="k">Reason</span><span class="v" id="sf-reason" style="font-weight:500;text-align:right;max-width:60%">…</span></div>
+          <div class="kv"><span class="k">Since</span><span class="v" id="sf-since">…</span></div>
+          <div class="kv"><span class="k">Legal next states</span><span class="v" id="sf-next">…</span></div>
+          <div style="margin-top:0.6rem;display:flex;gap:0.4rem;flex-wrap:wrap">
+            <button class="btn go" id="btn-cycle">Reconcile → Recover → Verify → Resume</button>
+            <button class="btn warn" id="btn-halt">Emergency halt</button>
+          </div>
+          <div class="muted" id="sf-msg" style="margin-top:0.4rem"></div>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">STATE INTEGRITY (replay of append-only trade log)</div>
+          <div class="kv"><span class="k">Trades replayed</span><span class="v" id="in-trades">…</span></div>
+          <div class="kv"><span class="k">Realised P&amp;L</span><span class="v" id="in-pnl">…</span></div>
+          <div class="kv"><span class="k">Capital implied by replay</span><span class="v" id="in-cap">…</span></div>
+          <div id="in-findings"></div>
+        </div>
+      </div>
+      <div style="margin-top:0.7rem;border-top:1px solid var(--gm-bd);padding-top:0.5rem">
+        <div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">ACTIVE GUARDRAILS (deterministic, server-enforced)</div>
+        <div id="sf-limits" class="muted"></div>
+      </div>
+    </section>
+
+    <!-- ══ 2. MARKET INTELLIGENCE ══ -->
+    <section class="gm-card mt-2" data-panel="market" data-title="Market Overview">
+      <h3><span>Market Intelligence</span><span class="muted" id="mi-breadth"></span></h3>
+      <div style="overflow-x:auto">
+        <table class="gm" id="mi-tbl">
+          <thead><tr><th>Index</th><th>LTP</th><th>Chg%</th><th>EMA 9/21</th><th>ADX</th><th>Regime</th><th>ATR</th><th>Vol%</th><th>Dealer γ</th></tr></thead>
+          <tbody><tr><td colspan="9" class="muted">Loading live data…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="gm-grid gm-2 mt-2">
+      <!-- ══ 3. OPTION-CHAIN INTELLIGENCE ══ -->
+      <section class="gm-card" data-panel="chain" data-title="Option Chain">
+        <h3>
+          <span>Option-Chain Intelligence</span>
+          <select id="oc-sym" style="font-size:0.68rem;padding:0.15rem 0.3rem">
+            <option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option><option>MIDCPNIFTY</option>
+          </select>
+        </h3>
+        <div id="oc-head" class="muted" style="margin-bottom:0.4rem"></div>
+        <div style="overflow-x:auto;max-height:280px">
+          <table class="gm" id="oc-tbl">
+            <thead><tr><th>Strike</th><th>CE OI</th><th>ΔCE</th><th>CE Vol</th><th>CE IV</th><th>PE OI</th><th>ΔPE</th><th>PE Vol</th><th>PE IV</th><th>Liq</th></tr></thead>
+            <tbody><tr><td colspan="10" class="muted">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="oc-levels" style="margin-top:0.5rem"></div>
+      </section>
+
+      <!-- ══ 4. TRADE INTELLIGENCE ══ -->
+      <section class="gm-card" data-panel="trade" data-title="Trade Setup">
+        <h3><span>Trade Intelligence</span><span class="muted" id="ti-sym"></span></h3>
+        <div id="ti-body" class="muted">Loading current setup…</div>
+      </section>
+    </div>
+
+    <div class="gm-grid gm-2 mt-2">
+      <!-- ══ 5. PORTFOLIO INTELLIGENCE ══ -->
+      <section class="gm-card" data-panel="portfolio" data-title="Portfolio">
+        <h3><span>Portfolio Intelligence</span><span class="muted">paper book</span></h3>
+        <div class="gm-grid gm-2">
+          <div>
+            <div class="kv"><span class="k">Capital</span><span class="v" id="pf-cap">…</span></div>
+            <div class="kv"><span class="k">Realised P&amp;L</span><span class="v" id="pf-pnl">…</span></div>
+            <div class="kv"><span class="k">Open P&amp;L</span><span class="v" id="pf-open">…</span></div>
+            <div class="kv"><span class="k">Return</span><span class="v" id="pf-ret">…</span></div>
+          </div>
+          <div>
+            <div class="kv"><span class="k">Deployed / exposure</span><span class="v" id="pf-exp">…</span></div>
+            <div class="kv"><span class="k">Free capital</span><span class="v" id="pf-free">…</span></div>
+            <div class="kv"><span class="k">Net Δ (delta)</span><span class="v" id="pf-delta">…</span></div>
+            <div class="kv"><span class="k">Concentration</span><span class="v" id="pf-conc">…</span></div>
+          </div>
+        </div>
+        <div id="pf-alerts" style="margin-top:0.5rem"></div>
+        <div id="pf-pos" style="margin-top:0.5rem"></div>
+      </section>
+
+      <!-- ══ 6. SKILL REGISTRY ══ -->
+      <section class="gm-card" data-panel="skills" data-title="Skill Registry">
+        <h3><span>Skill Registry</span><span class="muted" id="sk-count"></span></h3>
+        <div id="sk-body" class="muted">Loading…</div>
+      </section>
+    </div>
+
+    <!-- ══ 7. AUDIT LOG ══ -->
+    <section class="gm-card mt-2" data-panel="audit" data-title="Audit Log">
+      <h3>
+        <span>System Audit Log</span>
+        <span>
+          <select id="au-cat" style="font-size:0.68rem;padding:0.15rem 0.3rem">
+            <option value="">all</option><option>security</option><option>safety</option>
+            <option>risk</option><option>recovery</option><option>order</option><option>broker</option><option>error</option>
+          </select>
+        </span>
+      </h3>
+      <div id="au-counts" class="muted" style="margin-bottom:0.4rem"></div>
+      <div id="au-body" style="max-height:270px;overflow-y:auto"></div>
+    </section>
+  </main>
+
+  <!-- ══ 8. AI COPILOT ══ -->
+  <div class="cop min" id="cop">
+    <div class="cop-h" id="cop-h">
+      <span style="font-weight:800;font-size:0.8rem">AI Copilot
+        <span class="ctxpill" id="cop-ctx">context: —</span></span>
+      <span class="muted" id="cop-cost">0 calls</span>
+    </div>
+    <div class="cop-b" id="cop-b">
+      <div class="muted">I can see the panel you are looking at. Ask “what do you see?”, “what's my biggest risk?”,
+        or “is this setup safe to take?” — I read the numbers already computed on this page rather than recomputing them.</div>
+    </div>
+    <div class="cop-f">
+      <input id="cop-i" placeholder="Ask about what's on screen…" />
+      <button class="btn" id="cop-send">Ask</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import { INSTRUMENTS, getCandles, generateSignal, buildSnapshot, ADX, ATR, RSI, EMA,
+             bsDelta, fmt, inr } from './js/live-engine.js?v=3.7';
+    import { godBrain } from './js/god-mode.js?v=2.4';
+    import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
+    import { startBuildCheck } from './js/core/build-check.js?v=1.0';
+    startBuildCheck('2026-08-26-r10');
+
+    // Evict keys written by older builds; all state is server-owned now.
+    try {
+      ['ai_paper_v2','ai_paper_version','godmode_patterns','godmode_learnings',
+       'godmode_trades','godmode_version'].forEach(k => localStorage.removeItem(k));
+      ['godmode_last_signal','sig_lock'].forEach(k => sessionStorage.removeItem(k));
+    } catch (e) {}
+
+    const PROXY = '/signals/api/proxy.php';
+    const IDX = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'];
+    const $ = id => document.getElementById(id);
+    const bust = () => '&cb=' + Date.now();
+    const noStore = { cache: 'no-store' };
+    const j = async (u) => { try { const r = await fetch(u, noStore); return await r.json(); } catch (e) { return null; } }
+
+    // ═══ CONTEXT BUNDLE ═══════════════════════════════════════════════════════
+    // Everything the copilot may reason about, computed DETERMINISTICALLY here.
+    // The model is never asked to do arithmetic — it receives finished numbers and
+    // is asked only to interpret them. That is both cheaper and not guessable.
+    const CTX = { panel: 'market', panelTitle: 'Market Overview', instrument: 'NIFTY',
+                  safety: null, integrity: null, market: [], chain: null, trade: null,
+                  portfolio: null, skills: null, audit: null, updatedAt: null };
+
+    (function ms(){ const i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
+      const d=i.getDay(),t=i.getHours()*60+i.getMinutes(); const e=$('mkt-t'),b=$('mkt');
+      const open = d!==0 && d!==6 && t>=555 && t<=930;
+      e.textContent = open?'MARKET OPEN':'CLOSED';
+      b.className = 'market-status-badge ' + (open?'open':'closed');
+      CTX.marketOpen = open; setTimeout(ms,30000); })();
+    const marketOpen = () => !!CTX.marketOpen;
+
+    // ═══ 1. SAFETY ════════════════════════════════════════════════════════════
+    const PIPE = ['UNKNOWN','HALTED','RECONCILING','RECOVERING','VERIFYING','RUNNING'];
+    async function loadSafety() {
+      const d = await j(PROXY + '?action=safety_state' + bust());
+      if (!d || !d.safety) return;
+      const s = d.safety, integ = d.integrity;
+      CTX.safety = s; CTX.integrity = integ;
+
+      const badge = $('sf-badge');
+      badge.textContent = s.state;
+      const col = s.state === 'RUNNING' ? ['#10b981','#04120c']
+                : s.state === 'HALTED'  ? ['#ef4444','#fff']
+                : s.state === 'UNKNOWN' ? ['#6b7280','#fff'] : ['#f59e0b','#0a0e17'];
+      badge.style.background = col[0]; badge.style.color = col[1];
+
+      const at = PIPE.indexOf(s.state);
+      $('sf-pipe').innerHTML = PIPE.map((p,i) => {
+        let c = 'step';
+        if (s.state === 'RUNNING') c += ' done';
+        else if (i < at) c += ' done';
+        else if (i === at) c += (s.state === 'HALTED' || s.state === 'UNKNOWN') ? ' bad' : ' at';
+        return `<div class="${c}">${p}</div>`;
+      }).join('');
+
+      $('sf-exec').innerHTML = s.executionAllowed
+        ? '<span class="text-green">YES</span>' : '<span class="text-red">NO — blocked</span>';
+      $('sf-reason').textContent = s.reason || '—';
+      $('sf-since').textContent = s.since ? new Date(s.since).toLocaleString('en-IN',{hour12:false}) : '—';
+      $('sf-next').textContent = (s.allowedTransitions || []).join(' , ') || '—';
+
+      $('in-trades').textContent = integ.truth.trades;
+      $('in-pnl').innerHTML = `<span class="${integ.truth.realisedPnl>=0?'text-green':'text-red'}">${inr(integ.truth.realisedPnl)}</span>`;
+      $('in-cap').textContent = inr(integ.truth.expectedCapital);
+      $('in-findings').innerHTML = integ.clean
+        ? '<div class="muted" style="margin-top:0.4rem">✓ Recorded state matches the trade-log replay.</div>'
+        : integ.findings.map(f => `<div class="finding ${f.severity==='high'?'high':''}"><b>${f.code}</b> — ${f.detail}</div>`).join('');
+
+      const L = d.limits;
+      $('sf-limits').innerHTML = [
+        `duplicate-intent cooldown <b>${L.dupWindowSec}s</b>`,
+        `price staleness <b>${L.priceMaxAgeSec}s</b>`,
+        `max open positions <b>${L.maxOpenPositions}</b>`,
+        `retry ceiling <b>${L.maxRetries}</b>`,
+        `AI tool calls <b>${L.maxToolCallsPerMin}/min</b>`,
+        `tool recursion depth <b>${L.maxToolDepth}</b>`,
+      ].map(x => `<span class="chip">${x}</span>`).join('');
+    }
+
+    $('btn-cycle').onclick = async () => {
+      const b = $('btn-cycle'); b.disabled = true; $('sf-msg').textContent = 'Running reconcile → recover → verify…';
+      try {
+        const r = await (await authedFetch(PROXY + '?action=safety_action&op=cycle', { method:'POST' })).json();
+        $('sf-msg').innerHTML = (r.steps || []).map(s => '• ' + s).join('<br>');
+        await loadSafety(); noteEvent('safety cycle completed → ' + (r.state || '?'));
+      } catch (e) { $('sf-msg').textContent = 'Failed: ' + e; }
+      b.disabled = false;
+    };
+    $('btn-halt').onclick = async () => {
+      if (!confirm('Halt the system? All execution stops until a full verify passes.')) return;
+      await authedFetch(PROXY + '?action=safety_action&op=halt&reason=Manual+halt+from+dashboard', { method:'POST' });
+      await loadSafety(); noteEvent('system halted manually');
+    };
+
+    // ═══ 2. MARKET ════════════════════════════════════════════════════════════
+    async function loadMarket() {
+      const rows = [];
+      for (const s of IDX) {
+        const c = await getCandles(s, 'FIFTEEN_MINUTE', 6);
+        if (!c || !c.count) { rows.push({ sym:s, dead:true }); continue; }
+        const { opens,highs,lows,closes,timestamps:ts } = c;
+        const ltp = closes[closes.length-1];
+
+        // Session change must be measured from the CURRENT session's open, not from
+        // opens[0] — that is the first candle of a 6-day window, so it reported a
+        // multi-day move as if it were today's (NIFTY read -1.34% while the latest
+        // session was actually flat). Find where the most recent session starts.
+        const dayOf = i => new Date(ts[i]).toLocaleDateString('en-IN', { timeZone:'Asia/Kolkata' });
+        const lastDay = dayOf(ts.length - 1);
+        let sessStart = ts.length - 1;
+        while (sessStart > 0 && dayOf(sessStart - 1) === lastDay) sessStart--;
+        const sessOpen = opens[sessStart];
+        // Previous session's close, for a true "since previous close" reading.
+        const prevClose = sessStart > 0 ? closes[sessStart - 1] : null;
+        const refPrice = prevClose != null ? prevClose : sessOpen;
+
+        const adx = ADX(highs,lows,closes).adx;
+        const atr = ATR(highs,lows,closes);
+        const e9 = EMA(closes,9), e21 = EMA(closes,21);
+        const trend = (e9 && e21) ? (e9 > e21 ? 'UP' : 'DOWN') : '—';
+        const regime = adx == null ? '—' : adx >= 25 ? 'Trending' : adx >= 18 ? 'Developing' : 'Choppy';
+        rows.push({ sym:s, ltp, chg: refPrice ? (ltp-refPrice)/refPrice*100 : 0,
+                    chgBasis: prevClose != null ? 'vs prev close' : 'vs session open',
+                    sessionDate: lastDay, adx, atr,
+                    volPct: atr && ltp ? atr/ltp*100 : null, trend, regime });
+        await new Promise(f => setTimeout(f, 120));
+      }
+      // Dealer gamma per index (cheap: cached server-side 60s)
+      for (const r of rows) {
+        if (r.dead) continue;
+        const g = await j(PROXY + '?action=gex&symbol=' + r.sym + bust());
+        if (g && g.status && g.data) {
+          r.gex = g.data.reliable === false ? 'low-coverage' : (g.data.regime || '—');
+          r.gexData = g.data;
+        } else r.gex = 'n/a';
+      }
+      CTX.market = rows;
+
+      const up = rows.filter(r => !r.dead && r.chg > 0).length;
+      const tot = rows.filter(r => !r.dead).length;
+      const live = rows.find(r => !r.dead);
+      $('mi-breadth').textContent = tot
+        ? `breadth ${up}/${tot} advancing · Chg% ${live?.chgBasis || ''}${live?.sessionDate ? ' (' + live.sessionDate + ')' : ''} · EMA 9/21 is short-term structure, not the session direction`
+        : '';
+      $('mi-tbl').querySelector('tbody').innerHTML = rows.map(r => r.dead
+        ? `<tr><td>${r.sym}</td><td colspan="8" class="muted">no data</td></tr>`
+        : `<tr>
+             <td><b>${r.sym}</b></td>
+             <td>${fmt(r.ltp,1)}</td>
+             <td class="${r.chg>=0?'text-green':'text-red'}">${r.chg>=0?'+':''}${r.chg.toFixed(2)}%</td>
+             <td class="${r.trend==='UP'?'text-green':'text-red'}">${r.trend}</td>
+             <td>${r.adx!=null?r.adx.toFixed(0):'—'}</td>
+             <td>${r.regime}</td>
+             <td>${r.atr?fmt(r.atr,1):'—'}</td>
+             <td>${r.volPct!=null?r.volPct.toFixed(2)+'%':'—'}</td>
+             <td class="${r.gex==='Negative Gamma'?'text-green':r.gex==='Positive Gamma'?'text-red':''}">${r.gex||'—'}</td>
+           </tr>`).join('');
+    }
+
+    // ═══ 3. OPTION CHAIN ══════════════════════════════════════════════════════
+    async function loadChain() {
+      const sym = $('oc-sym').value;
+      CTX.instrument = sym;
+      // OI comes from ?action=gex, NOT ?action=option_chain. The latter returns
+      // Greeks only (delta/gamma/theta/vega/iv) with no open interest at all, so an
+      // OI table built from it would have been fabricated.
+      const gx = await j(PROXY + '?action=gex&symbol=' + sym + bust());
+      const g = (gx && gx.status) ? gx.data : null;
+      const spot = g?.spot;
+      const strikes = Array.isArray(g?.strikes) ? g.strikes : [];
+
+      if (!strikes.length) {
+        $('oc-tbl').querySelector('tbody').innerHTML = '<tr><td colspan="10" class="muted">Per-strike OI unavailable for this symbol.</td></tr>';
+        CTX.chain = { symbol: sym, spot, available: false };
+      } else {
+        const step = sym==='BANKNIFTY'?100:sym==='MIDCPNIFTY'?25:50;
+        const atm = spot ? Math.round(spot/step)*step : null;
+        const rows = strikes.filter(r => atm==null || Math.abs(r.strike-atm) <= step*8);
+        // Liquidity is ranked by measured combined OI, so "key strikes" is computed.
+        const maxOI = Math.max(1, ...rows.map(r => (r.ceOI||0)+(r.peOI||0)));
+        const d = v => (v==null ? '—' : Math.round(v).toLocaleString('en-IN'));
+        const sgn = v => v==null ? '—' : (v>=0?'+':'') + Math.round(v).toLocaleString('en-IN');
+        $('oc-tbl').querySelector('tbody').innerHTML = rows.map(r => {
+          const liq = Math.round((((r.ceOI||0)+(r.peOI||0))/maxOI)*100);
+          const isAtm = atm!=null && r.strike===atm;
+          return `<tr class="${isAtm?'atm':''}">
+            <td>${r.strike}${isAtm?' <span class="chip">ATM</span>':''}</td>
+            <td>${d(r.ceOI)}</td><td class="${(r.ceOIChg??0)>=0?'text-green':'text-red'}">${sgn(r.ceOIChg)}</td>
+            <td>${d(r.ceVol)}</td><td>${r.ceIV?r.ceIV.toFixed(1):'—'}</td>
+            <td>${d(r.peOI)}</td><td class="${(r.peOIChg??0)>=0?'text-green':'text-red'}">${sgn(r.peOIChg)}</td>
+            <td>${d(r.peVol)}</td><td>${r.peIV?r.peIV.toFixed(1):'—'}</td>
+            <td>${liq}%</td></tr>`;
+        }).join('');
+        const byCall = rows.slice().sort((a,b)=>(b.ceOI||0)-(a.ceOI||0))[0];
+        const byPut  = rows.slice().sort((a,b)=>(b.peOI||0)-(a.peOI||0))[0];
+        CTX.chain = { symbol: sym, spot, atm, strikesShown: rows.length, available: true,
+          heaviestCallOIStrike: byCall?.strike, heaviestPutOIStrike: byPut?.strike,
+          totalCallOI: g.totalCallOI, totalPutOI: g.totalPutOI,
+          callOIChg: g.callOIChg, putOIChg: g.putOIChg };
+      }
+
+      $('oc-head').innerHTML = g
+        ? `spot <b>${fmt(spot,1)}</b> · expiry <b>${g.expiry}</b> · PCR <b>${g.pcr||'n/a'}</b> · chain coverage <b>${g.coverage}%</b> ${g.reliable?'':'<span class="text-red">(unreliable — dealer levels suppressed)</span>'}`
+          + `<br><span class="muted">ΔOI basis: ${g.oiChgBasis || 'n/a'} — the broker feed does not publish OI change, so it is derived from this server's first observation of the session.</span>`
+        : 'GEX unavailable';
+      $('oc-levels').innerHTML = (g && g.reliable) ? [
+        ['Dealer regime', g.regime, g.regime==='Negative Gamma'?'text-green':'text-red'],
+        ['Zero-gamma flip', g.flip, ''], ['Call wall', g.callWall, 'text-red'],
+        ['Put wall', g.putWall, 'text-green'], ['Max pain', g.maxPain, ''],
+      ].map(([k,v,c]) => `<span class="chip"><span class="muted">${k}</span> <b class="${c}">${v}</b></span>`).join('') : '';
+      if (g) CTX.chain = { ...(CTX.chain||{}), gex: {
+        regime:g.regime, flip:g.flip, callWall:g.callWall, putWall:g.putWall,
+        maxPain:g.maxPain, pcr:g.pcr, coverage:g.coverage, reliable:g.reliable } };
+    }
+    $('oc-sym').onchange = () => { loadChain(); loadTrade(); };
+
+    // ═══ 4. TRADE INTELLIGENCE ════════════════════════════════════════════════
+    async function loadTrade() {
+      const sym = $('oc-sym').value;
+      $('ti-sym').textContent = sym;
+      const snap = await buildSnapshot(sym);
+      if (!snap) { $('ti-body').innerHTML = '<span class="muted">No snapshot available.</span>'; return; }
+      const gx = await j(PROXY + '?action=gex&symbol=' + sym + bust());
+      if (gx && gx.status) snap.gex = gx.data;
+      const sig = generateSignal(snap, { confidenceThreshold: 60 });
+
+      // Run God Mode so the panel can state the ACTUAL gate that is blocking a
+      // trade. Without this the page shows "NO_TRADE" with no way to tell whether
+      // that is a weak setup, an expiry-day threshold, or a halted safety state —
+      // which is why "why do I never get a trade?" kept coming up.
+      let gm = null;
+      try { gm = (godBrain.process(sig, snap) || {}).godMode || null; } catch (e) {}
+      CTX.trade = { symbol: sym, direction: sig.direction, confidence: sig.confidence,
+                    netScore: sig.netScore, vetoes: sig.vetoes || [],
+                    regime: sig.strategy?.regime, adx: sig.strategy?.adx, mtf: sig.strategy?.mtf,
+                    trade: sig.optionTrade || sig.watchTrade || null };
+
+      const t = sig.optionTrade || sig.watchTrade;
+      const dirCol = sig.direction==='BUY'?'text-green':sig.direction==='SELL'?'text-red':'muted';
+      let h = `<div class="kv"><span class="k">Setup</span><span class="v ${dirCol}">${sig.direction} · ${sig.confidence}% confidence</span></div>`;
+      h += `<div class="kv"><span class="k">Regime / ADX / 1H bias</span><span class="v">${sig.strategy?.regime||'—'} · ${sig.strategy?.adx??'—'} · ${sig.strategy?.mtf||'—'}</span></div>`;
+      if (t) {
+        h += `<div class="kv"><span class="k">Contract</span><span class="v">${t.strike} ${t.type}${t.expiryDisplay?' · '+t.expiryDisplay:''}</span></div>`;
+        if (t.stopLoss) h += `<div class="kv"><span class="k">Invalidation (stop)</span><span class="v text-red">₹${fmt(t.stopLoss.premium,1)}</span></div>`;
+        if (t.target1)  h += `<div class="kv"><span class="k">Target 1</span><span class="v text-green">₹${fmt(t.target1.premium,1)}</span></div>`;
+      }
+      // Evidence: the vetoes ARE the evidence against; show them plainly.
+      h += `<div style="margin-top:0.5rem;font-size:0.7rem;color:#93a4bd">EVIDENCE AGAINST (${(sig.vetoes||[]).length})</div>`;
+      h += (sig.vetoes && sig.vetoes.length)
+        ? sig.vetoes.map(v => `<div class="finding high">${v}</div>`).join('')
+        : '<div class="muted">No blocking conditions detected.</div>';
+      // ── WHY IS NOTHING TRADING? ──
+      // Every gate, stated with its arithmetic, hardest blocker first.
+      const blockers = [];
+      if (!CTX.safety?.executionAllowed) {
+        blockers.push(['crit', `Safety state is <b>${CTX.safety?.state}</b> — execution is refused regardless of setup quality.`]);
+      }
+      if (gm) {
+        const gc = gm.godConfidence != null ? Math.round(gm.godConfidence) : null;
+        const th = gm.adaptiveThreshold;
+        if (gc != null && th != null && gc < th) {
+          const dte = snap.dte;
+          let why = `God Mode conviction <b>${gc}%</b> is below the <b>${th}%</b> bar for this regime.`;
+          if (dte != null && dte <= 1) {
+            why += ` The bar is raised to 80% because this contract is <b>${Number(dte).toFixed(1)} days from expiry</b>`
+                 + ` — at 0-1 DTE premium decays too fast to risk a marginal setup.`;
+          }
+          blockers.push(['crit', why]);
+        }
+        if (gm.dailyLimit) blockers.push(['high', 'Daily signal limit reached.']);
+        if (gm.timeExit?.exit) blockers.push(['high', `Time-based exit active: ${gm.timeExit.reason || 'late session'}.`]);
+      }
+      for (const v of (sig.vetoes || [])) blockers.push(['high', v]);
+      if (sig.direction === 'NO_TRADE' && !blockers.length) {
+        blockers.push(['high', `Raw engine score ${sig.netScore} is inside the neutral band — no directional edge to act on.`]);
+      }
+
+      h += `<div style="margin-top:0.6rem;padding-top:0.5rem;border-top:1px solid var(--gm-bd)">`;
+      h += `<div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">WHY THERE IS NO TRADE (${blockers.length} blocker${blockers.length===1?'':'s'})</div>`;
+      h += blockers.length
+        ? blockers.map(([sev, m]) => `<div class="finding ${sev==='high'?'high':''}">${m}</div>`).join('')
+        : `<div class="muted">Nothing is blocking — this setup is executable.</div>`;
+      if (gm && gm.godConfidence != null && gm.adaptiveThreshold != null) {
+        const gc = Math.round(gm.godConfidence), th = gm.adaptiveThreshold;
+        const pct = Math.max(0, Math.min(100, gc / th * 100));
+        h += `<div style="margin-top:0.45rem">`;
+        h += `<div class="muted" style="font-size:0.66rem">conviction ${gc}% of the ${th}% required`
+           + (snap.dte != null ? ` · ${Number(snap.dte).toFixed(1)} DTE` : '') + `</div>`;
+        h += `<div style="height:6px;background:rgba(31,41,55,0.8);border-radius:99px;overflow:hidden;margin-top:0.2rem">`
+           + `<div style="height:100%;width:${pct}%;background:${gc>=th?'#10b981':'#f59e0b'}"></div></div></div>`;
+      }
+      h += `</div>`;
+      $('ti-body').innerHTML = h;
+      CTX.trade.blockers = blockers.map(b => b[1].replace(/<[^>]+>/g, ''));
+      if (gm) { CTX.trade.godConfidence = gm.godConfidence != null ? Math.round(gm.godConfidence) : null;
+                CTX.trade.adaptiveThreshold = gm.adaptiveThreshold; CTX.trade.dte = snap.dte; }
+    }
+
+    // ═══ 5. PORTFOLIO ═════════════════════════════════════════════════════════
+    async function loadPortfolio() {
+      const [st, rp] = await Promise.all([
+        j(PROXY + '?action=paper_state' + bust()),
+        j(PROXY + '?action=paper_report' + bust()),
+      ]);
+      const s = st?.state || {}, r = rp?.report || {};
+      const base = s.initialCapital || 100000;
+      const active = Array.isArray(s.active) ? s.active : [];
+
+      let deployed = 0, openPnl = 0, netDelta = 0;
+      const byInst = {};
+      for (const p of active) {
+        const cost = +(p.cost || 0); deployed += cost;
+        const lots = (p.lotSize || 0) * (p.sizeMultiplier || 1);
+        openPnl += ((p.currentPremium || p.entryPremium || 0) - (p.entryPremium || 0)) * lots;
+        // Directional delta: long CE and short PE are both long the underlying.
+        const dir = (p.type === 'CE' ? 1 : -1);
+        netDelta += dir * (p.delta != null ? Math.abs(p.delta) : 0.5) * lots;
+        byInst[p.instrument] = (byInst[p.instrument] || 0) + cost;
+      }
+      const capital = (r.capital != null) ? r.capital : (s.capital != null ? s.capital : base);
+      const conc = deployed > 0 ? Math.max(...Object.values(byInst)) / deployed * 100 : 0;
+      CTX.portfolio = { capital, realisedPnl: r.totalPnl ?? 0, openPnl: Math.round(openPnl),
+        returnPct: r.returnPct ?? 0, deployed: Math.round(deployed),
+        free: Math.round(capital - deployed), netDelta: Math.round(netDelta),
+        concentrationPct: Math.round(conc), positions: active.length, byInstrument: byInst };
+
+      $('pf-cap').textContent = inr(Math.round(capital));
+      $('pf-pnl').innerHTML = `<span class="${(r.totalPnl||0)>=0?'text-green':'text-red'}">${inr(Math.round(r.totalPnl||0))}</span>`;
+      $('pf-open').innerHTML = `<span class="${openPnl>=0?'text-green':'text-red'}">${inr(Math.round(openPnl))}</span>`;
+      $('pf-ret').innerHTML = `<span class="${(r.returnPct||0)>=0?'text-green':'text-red'}">${(r.returnPct||0)>=0?'+':''}${r.returnPct||0}%</span>`;
+      $('pf-exp').textContent = inr(Math.round(deployed)) + (capital? ` (${Math.round(deployed/capital*100)}%)` : '');
+      $('pf-free').textContent = inr(Math.round(capital - deployed));
+      $('pf-delta').textContent = Math.round(netDelta).toLocaleString('en-IN');
+      $('pf-conc').textContent = active.length ? Math.round(conc) + '% in one name' : '—';
+
+      // Risk alerts are thresholds on computed numbers, not opinions.
+      const al = [];
+      if (active.length >= 3) al.push(['high','At the 3-position ceiling; no new entries will pass the guardrail.']);
+      if (capital && deployed / capital > 0.5) al.push(['crit',`Over half of capital deployed (${Math.round(deployed/capital*100)}%).`]);
+      if (active.length > 1 && conc > 70) al.push(['high',`Concentration ${Math.round(conc)}% in a single instrument.`]);
+      if ((r.returnPct||0) < -5) al.push(['crit',`Drawdown ${r.returnPct}% against the starting budget.`]);
+      if (!CTX.safety?.executionAllowed) al.push(['crit',`Safety state ${CTX.safety?.state} — execution blocked.`]);
+      $('pf-alerts').innerHTML = al.length
+        ? al.map(([sev,m]) => `<div class="finding ${sev==='high'?'high':''}">${m}</div>`).join('')
+        : '<div class="muted">No risk thresholds breached.</div>';
+
+      $('pf-pos').innerHTML = active.length ? ('<table class="gm"><thead><tr><th>Position</th><th>Entry</th><th>Now</th><th>Cost</th><th>P&L</th></tr></thead><tbody>' +
+        active.map(p => {
+          const lots = (p.lotSize||0)*(p.sizeMultiplier||1);
+          const pl = ((p.currentPremium||p.entryPremium||0)-(p.entryPremium||0))*lots;
+          return `<tr><td>${p.direction} ${p.instrument} ${p.strike} ${p.type}</td>
+            <td>₹${fmt(p.entryPremium,1)}</td><td>₹${fmt(p.currentPremium||p.entryPremium,1)}</td>
+            <td>${inr(Math.round(p.cost||0))}</td>
+            <td class="${pl>=0?'text-green':'text-red'}">${inr(Math.round(pl))}</td></tr>`;
+        }).join('') + '</tbody></table>')
+        : '<div class="muted">No open positions.</div>';
+    }
+
+    // ═══ 6. SKILLS ════════════════════════════════════════════════════════════
+    async function loadSkills() {
+      const d = await j(PROXY + '?action=skills&maxRisk=high' + bust());
+      if (!d || !d.skills) return;
+      CTX.skills = d.skills.map(s => ({ name:s.name, risk:s.risk_level, blocked:s.blocked||null }));
+      $('sk-count').textContent = `${d.count} registered · safety ${d.safetyState}`;
+      $('sk-body').innerHTML = d.skills.map(s => `
+        <div class="skill ${s.blocked?'blocked':''}">
+          <div class="nm">${s.name} <span class="chip r-${s.risk_level}">${s.risk_level} risk</span>
+            <span class="chip">${s.kind}</span><span class="chip">${s.latency}</span><span class="chip">${s.cost}</span></div>
+          <div class="ds">${s.description}</div>
+          <div class="muted">in: ${(s.inputs||[]).join(', ')||'—'} → out: ${(s.outputs||[]).join(', ')||'—'}</div>
+          <div class="muted">perms: ${(s.permissions||[]).join(', ')} · availability: ${s.availability}</div>
+          ${s.requires_confirmation?'<div class="muted text-amber">requires explicit confirmation</div>':''}
+          ${s.blocked?`<div class="finding high" style="margin-top:0.3rem">BLOCKED — ${s.blocked}</div>`:''}
+          ${s.notes?`<div class="muted" style="margin-top:0.2rem">note: ${s.notes}</div>`:''}
+        </div>`).join('');
+    }
+
+    // ═══ 7. AUDIT ═════════════════════════════════════════════════════════════
+    async function loadAudit() {
+      const cat = $('au-cat').value;
+      const d = await j(PROXY + '?action=audit_log&limit=140' + (cat?'&category='+cat:'') + bust());
+      if (!d) return;
+      CTX.audit = { total: d.total, counts: d.counts };
+      $('au-counts').innerHTML = Object.entries(d.counts||{})
+        .map(([k,v]) => `<span class="chip">${k} <b>${v}</b></span>`).join('') + ` <span class="muted">${d.total} today</span>`;
+      $('au-body').innerHTML = (d.entries||[]).slice().reverse().map(e => {
+        const dd = e.data || {};
+        const bits = ['guardrail','reason','detail','from','to','ok','action']
+          .filter(k => k in dd).map(k => `${k}=${String(dd[k]).slice(0,60)}`).join(' ');
+        return `<div class="aud ${e.category}">${e.iso.slice(11,19)} <b>[${e.category}]</b> ${e.event} ${bits}</div>`;
+      }).join('') || '<div class="muted">No entries.</div>';
+    }
+    $('au-cat').onchange = loadAudit;
+
+    // ═══ 8. COPILOT — screen-context aware, event-driven ══════════════════════
+    // Cost control: the model is called ONLY when the user asks, or when a material
+    // event fires (see noteEvent). Never on a refresh tick. Every number it sees was
+    // already computed deterministically above.
+    let aiCalls = 0, lastEventNote = null;
+    const cop = $('cop');
+    $('cop-h').onclick = () => cop.classList.toggle('min');
+
+    // Which panel is the user actually looking at? Whichever is most in view.
+    const panels = [...document.querySelectorAll('[data-panel]')];
+    function trackPanel() {
+      let best = null, bestVis = 0;
+      for (const p of panels) {
+        const r = p.getBoundingClientRect();
+        const vis = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+        if (vis > bestVis) { bestVis = vis; best = p; }
+      }
+      if (best && best.dataset.panel !== CTX.panel) {
+        CTX.panel = best.dataset.panel; CTX.panelTitle = best.dataset.title;
+        $('cop-ctx').textContent = 'context: ' + CTX.panelTitle;
+      }
+    }
+    addEventListener('scroll', trackPanel, { passive:true });
+
+    /** Only the slice of context relevant to what's on screen — keeps prompts small. */
+    function scopedContext() {
+      const base = { panelInView: CTX.panelTitle, instrument: CTX.instrument,
+        marketOpen: CTX.marketOpen,
+        safety: CTX.safety && { state: CTX.safety.state, executionAllowed: CTX.safety.executionAllowed, reason: CTX.safety.reason },
+        integrity: CTX.integrity && { clean: CTX.integrity.clean, findings: CTX.integrity.findings.map(f=>f.code) } };
+      const add = { market:{ indices: CTX.market }, chain:{ chain: CTX.chain },
+        trade:{ trade: CTX.trade }, portfolio:{ portfolio: CTX.portfolio },
+        skills:{ skills: CTX.skills }, audit:{ audit: CTX.audit } }[CTX.panel] || {};
+      return { ...base, ...add };
+    }
+
+    function say(cls, text) {
+      const d = document.createElement('div');
+      d.className = 'msg ' + cls; d.textContent = text;
+      $('cop-b').appendChild(d); $('cop-b').scrollTop = $('cop-b').scrollHeight;
+    }
+
+    async function askAI(question, isAuto = false) {
+      const ctx = scopedContext();
+      // Deterministic guard: never let the copilot loop. Server also enforces this.
+      const budget = await (await authedFetch(PROXY + '?action=tool_budget&session=copilot&depth=0', { method:'POST' })).json();
+      if (!budget.allow) { say('a', 'Tool budget guardrail: ' + budget.detail); return; }
+
+      const prompt =
+        'You are the risk-aware copilot inside an Indian F&O trading dashboard.\n' +
+        'The user is currently viewing: ' + ctx.panelInView + '.\n' +
+        'All figures below were computed deterministically by the application. Do NOT recompute them, ' +
+        'do NOT invent numbers, and say plainly if something needed is missing.\n' +
+        'If safety.executionAllowed is false, make clear that no trade can be taken regardless of the setup.\n\n' +
+        'CONTEXT JSON:\n' + JSON.stringify(ctx) + '\n\n' +
+        'QUESTION: ' + question + '\n\nAnswer in under 160 words, specific and decision-oriented.';
+
+      say('a', '…thinking');
+      const holder = $('cop-b').lastChild;
+      try {
+        const r = await postJSON(PROXY + '?action=ai', { prompt });
+        const d = await r.json();
+        holder.textContent = d.narrative || d.analysis || d.text || ('No response (' + (d.error || r.status) + ')');
+      } catch (e) { holder.textContent = 'AI call failed: ' + e; }
+      aiCalls++; $('cop-cost').textContent = aiCalls + (aiCalls===1?' call':' calls') + (isAuto?' (1 auto)':'');
+    }
+
+    $('cop-send').onclick = () => {
+      const v = $('cop-i').value.trim(); if (!v) return;
+      $('cop-i').value = ''; say('u', 'You: ' + v); askAI(v);
+    };
+    $('cop-i').addEventListener('keydown', e => { if (e.key === 'Enter') $('cop-send').click(); });
+
+    /**
+     * Material-event trigger. This is the ONLY automatic AI path, and it is
+     * deliberately rate-limited to one interpretation per distinct event — a
+     * dashboard that calls a model on every refresh burns money for nothing.
+     */
+    function noteEvent(note) {
+      if (note === lastEventNote) return;
+      lastEventNote = note;
+      say('u', '[event] ' + note);
+      askAI('A material event just occurred: "' + note + '". Explain what it means for my risk right now and what I should do next.', true);
+    }
+
+    // ═══ ORCHESTRATION ════════════════════════════════════════════════════════
+    // Deterministic refresh cadence. Heavy option-chain work runs less often than
+    // the cheap safety poll, and nothing here calls the model.
+    let prevSafety = null, prevFindings = 0;
+    async function tickFast() {
+      await loadSafety();
+      // Material change in risk posture => one AI interpretation.
+      const st = CTX.safety?.state;
+      const nf = (CTX.integrity?.findings || []).length;
+      if (prevSafety && st !== prevSafety) noteEvent(`safety state changed ${prevSafety} → ${st}`);
+      else if (nf > prevFindings) noteEvent(`${nf} state-integrity finding(s) detected`);
+      prevSafety = st; prevFindings = nf;
+      await loadPortfolio();
+      await loadAudit();
+      CTX.updatedAt = new Date().toISOString();
+    }
+    async function tickSlow() {
+      await loadMarket();
+      await loadChain();
+      await loadTrade();
+    }
+
+    (async () => {
+      await primeWriteAuth();
+      await godBrain.ready().catch(()=>{});
+      trackPanel();
+      await tickFast();
+      await loadSkills();
+      await tickSlow();
+      setInterval(tickFast, 15000);
+      // Chain/GEX are the expensive calls; only refresh them while the market is open.
+      setInterval(() => { if (marketOpen()) tickSlow(); }, 60000);
+    })();
+  </script>
+</body>
+</html>

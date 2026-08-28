@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>FNO Signal Pro — Signal Generator</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">F</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html" class="active" style="color:var(--primary);background:var(--primary-dim)">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Paper Trade</a></li>
+      <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <section class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.75rem">
+      <div class="flex items-center gap-2">
+        <div>
+          <label for="sym">Instrument</label>
+          <select id="sym"></select>
+        </div>
+        <button id="gen" class="btn btn-primary" style="margin-top:1.2rem" onclick="run()">Generate Signal</button>
+        <button id="ai-btn" class="btn btn-outline" style="margin-top:1.2rem" onclick="runAI()">AI Analysis</button>
+        <label class="flex items-center gap-1" style="margin-top:1.5rem;cursor:pointer">
+          <input type="checkbox" id="autopick" checked style="width:auto"> <span class="text-xs">Auto-pick strongest index</span>
+        </label>
+      </div>
+      <div class="text-xs text-muted" style="margin-top:1.2rem">Engine: 7-factor · Angel One live data · <span class="text-green">Auto-refresh 30s</span></div>
+    </section>
+
+    <section class="mt-2" id="out">
+      <div class="loading-overlay"><div class="spinner"></div><span>Generating signal...</span></div>
+    </section>
+
+    <div class="disclaimer"><strong>DISCLAIMER:</strong> Informational only. Not financial advice. Signals are algorithmic — never guaranteed profitable. Position size appropriately.</div>
+  </main>
+
+  <script>
+    // Paper-trading and God Mode state are SERVER-owned now (?action=paper_state /
+    // ?action=god_state). Nothing here reads browser storage any more; this block
+    // only evicts keys written by older builds so a stale copy can't linger.
+    try {
+      ['ai_paper_v2','ai_paper_version','godmode_patterns','godmode_learnings',
+       'godmode_trades','godmode_version'].forEach(k => localStorage.removeItem(k));
+      // sessionStorage too: the last-signal handoff and the signal lock both
+      // moved into server state (god_state).
+      ['godmode_last_signal','sig_lock'].forEach(k => sessionStorage.removeItem(k));
+    } catch (e) {}
+  </script>
+  <script type="module">
+    import { INSTRUMENTS, buildSnapshot, generateSignal, buildOptionTrade, expertAdvice, getCandles, EMA, fmt, inr } from './js/live-engine.js?v=3.9';
+    import { godBrain } from './js/god-mode.js?v=2.5';
+    import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
+    import { startBuildCheck } from './js/core/build-check.js?v=1.0';
+    startBuildCheck('2026-08-28-r13');
+    import { paperTrader } from './js/paper-trading.js?v=4.5';
+    const PROXY = '/signals/api/proxy.php';
+    const MONTHS = { '01':'Jan','02':'Feb','03':'Mar','04':'Apr','05':'May','06':'Jun','07':'Jul','08':'Aug','09':'Sep','10':'Oct','11':'Nov','12':'Dec' };
+    const MONMAP = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
+    let currentSignal = null;
+
+    // Fetch expiry + ATM IV from option chain (cached server-side)
+    async function getChainMeta(symbol, spot) {
+      try {
+        const r = await fetch(PROXY + '?action=option_chain&symbol=' + symbol);
+        const j = await r.json();
+        if (!j.status || !j.data) return null;
+        const d = j.data;
+        // Find ATM strike IV using exchange-defined per-expiry metadata.
+        const step = Number(d.strikeStep) || (symbol==='BANKNIFTY'?100:symbol==='MIDCPNIFTY'?25:50);
+        const atm = Math.round(spot/step)*step;
+        let iv = null;
+        const row = d.strikes.find(s => Math.abs(Number(s.strike) - atm) < 0.001);
+        if (row) { const leg = row.CE || row.PE; if (leg) iv = leg.iv; }
+        if (!iv && d.avgCallIV) iv = d.avgCallIV;
+        // Parse expiry "18AUG2026"
+        let disp = null, dte = 5;
+        if (d.expiry && d.expiry.length >= 9) {
+          const dd = d.expiry.substring(0,2), mm = d.expiry.substring(2,5).toUpperCase(), yy = d.expiry.substring(5);
+          disp = dd + ' ' + (mm.charAt(0)+mm.slice(1).toLowerCase()) + ' ' + yy;
+          const exp = new Date(+yy, MONMAP[mm] || 0, +dd);
+          dte = Math.max(0.5, Math.ceil((exp - new Date()) / 86400000));
+        }
+        return {
+          iv: iv ? iv/100 : 0.15, ivSkew: d.ivSkew,
+          expiry: d.expiry, expiryDisplay: disp, dte,
+          lotSize: Number(d.lotSize) || null,
+          strikeStep: Number(d.strikeStep) || null,
+          instrumentType: d.instrumentType || null,
+        };
+      } catch (e) { return null; }
+    }
+
+    async function fetchJSON(url) { try { const r = await fetch(url); return await r.json(); } catch(e){ return null; } }
+
+    // Email alerts (server dedups so no spam). Confirmed + Pre-signal ("Be Ready").
+    async function sendAlert(payload) {
+      try { await postJSON(PROXY + '?action=alert', payload); } catch (e) {}
+    }
+
+    // ── SignalsBrain God Mode Integration ──────────────────────────────────
+    const BRAIN_URL = 'https://ads.sanctify.co.in/signals/api/proxy.php?action=brain_ingest';
+    const _ingestSeen = {};     // dedup key -> last ts (ms)
+    const _presignalSent = {};  // symbol|direction -> last pre-signal attempt (ms)
+    async function ingestToBrain(symbol, snap, sig) {
+      // DEDUP: the page re-scores every 10s. Without this, one unchanged setup gets
+      // written dozens of times and the brain counts each copy as an independent
+      // confirmation, which massively inflates that pattern's apparent edge.
+      // Same instrument + direction + net score (1-pt buckets) => at most 1 row / 60s.
+      const _k = symbol + '|' + sig.direction + '|' + Math.round(sig.netScore || 0);
+      const _now = Date.now();
+      if (_ingestSeen[_k] && (_now - _ingestSeen[_k]) < 60000) return;
+      _ingestSeen[_k] = _now;
+      // Send snapshot data to SignalsBrain for pattern memory + learning
+      try {
+        await postJSON(BRAIN_URL, ({
+            instrument: symbol,
+            direction: sig.direction,
+            confidence: sig.confidence,
+            net_score: sig.netScore,
+            ltp: sig.ltp,
+            atr: sig.atr,
+            regime: sig.strategy?.regime,
+            gex_regime: snap.gex?.regime,
+            gex_flip: snap.gex?.flip,
+            pcr: snap.pcr || snap.gex?.pcr,
+            adx: sig.strategy?.adx,
+            rsi: sig.rsi,
+            iv: snap.iv,
+            dte: snap.dte,
+            fii: snap.fiiFlow,
+            vix: snap.vix,
+            htf: sig.strategy?.mtf,
+            vetoes: sig.vetoes || [],
+            trade: sig.optionTrade || sig.watchTrade || null,
+            // God Mode output, under god_* names so it can never be confused with
+            // the engine's own indicators (the old god-mode _syncToServer wrote its
+            // sub-scores into `net_score`/`adx`, which poisoned pattern learning).
+            god_confidence: sig._godConfidence ?? null,
+            god_actionable: sig._godActionable ?? null,
+            god_historical_wr: sig._historicalWR ?? null,
+            god_historical_matches: sig._historicalMatches ?? null,
+            god_regime_shift: sig._regimeShift ?? null,
+            // Lock state, so post-trade review can tell a held signal from a fresh one.
+            locked: !!sig._lockRemainMs,
+            held: !!sig._held,
+            timestamp: Date.now() / 1000,
+          }));
+      } catch (e) { /* Silent — brain ingest is non-blocking */ }
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
+    function maybeAlert(sig, snap) {
+      // MARKET HOURS CHECK — never send alerts outside 09:15-15:30 IST
+      const _ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const _day = _ist.getDay();
+      const _min = _ist.getHours() * 60 + _ist.getMinutes();
+      if (_day === 0 || _day === 6 || _min < 555 || _min > 930) return; // Weekend or outside 09:15-15:30
+
+      const st = sig.strategy || {}; const gx = st.gex || {};
+      const trade = sig.optionTrade || sig.watchTrade || {};
+      const base = {
+        symbol: sig.symbol, spot: sig.ltp, strike: trade.strike, optType: trade.type,
+        expiry: trade.expiryDisplay || snap.expiryDisplay || '', confidence: sig.confidence,
+        winRate: sig._calibration?.available ? sig._calibration.empiricalWinRate : null,
+        regime: gx.regime || st.regime, flip: gx.flip, callWall: gx.callWall, putWall: gx.putWall,
+      };
+      if (sig.direction !== 'NO_TRADE' && trade.executable === true && sig._godActionable !== false) {
+        console.log(`[Alert] Sending CONFIRMED: ${sig.symbol} ${sig.direction} @ ${sig.confidence}%`);
+        sendAlert(Object.assign({
+          type: 'confirmed', direction: sig.direction,
+          entryPremium: trade.entryPremium,
+          t1: trade.targets ? trade.targets[0].premium : '', t2: trade.targets ? trade.targets[1].premium : '', t3: trade.targets ? trade.targets[2].premium : '',
+          sl: trade.stopLoss ? trade.stopLoss.premium : '',
+          notes: [
+            'Buy at market now — signal is confirmed.',
+            'Book 50% at T1, 30% at T2, trail the rest to T3.',
+            'Exit fully if premium hits the stop.',
+            (gx.regime ? ('GEX: ' + gx.regime + ' — ' + (gx.regime === 'Negative Gamma' ? 'moves get amplified, let winners run.' : 'range day, book profits quickly.')) : ''),
+          ].filter(Boolean),
+        }, base));
+      } else if (sig.direction === 'NO_TRADE') {
+        // ── PRE-SIGNAL GATE ───────────────────────────────────────────────────
+        // This used to fire on `confidence >= 40 && |netScore| > 8`, evaluated on
+        // every 30s refresh, with no regard for vetoes or higher-timeframe
+        // agreement. Live result: a BUY pre-signal for MIDCPNIFTY at 46% that was
+        // simultaneously NO_TRADE, blocked by EXPIRY_DAY_WEAK, rated 31% by God
+        // Mode, and contradicted by a bearish 1H — re-sent every 30 seconds.
+        // Only the server's 30-minute cooldown kept the inbox survivable.
+        //
+        // A pre-signal is meant to say "get ready", so it must clear a real bar:
+        const lean = sig.netScore >= 0 ? 'BUY' : 'SELL';
+        const mtfNum = typeof snap.mtfBias === 'number' ? snap.mtfBias : 0;
+        const gates = {
+          confidence:   sig.confidence >= 52,
+          conviction:   Math.abs(sig.netScore) >= 15,
+          noVetoes:     !(sig.vetoes && sig.vetoes.length),
+          mtfAgrees:    mtfNum === 0 || (lean === 'BUY' ? mtfNum >= 0 : mtfNum <= 0),
+          godAgrees:    sig._godConfidence == null || sig._godConfidence >= 45,
+          hasLevel:     !!(trade && (trade.entryTrigger || trade.strike)),
+        };
+        const failed = Object.entries(gates).filter(([, ok]) => !ok).map(([k]) => k);
+
+        // Client-side dedup: one attempt per symbol+direction per 30 min, matching
+        // the server cooldown, so we stop hammering the endpoint every refresh.
+        const pkey = sig.symbol + '|' + lean;
+        const plast = _presignalSent[pkey] || 0;
+        const fresh = (Date.now() - plast) > 1800000;
+
+        if (!failed.length && fresh) {
+          _presignalSent[pkey] = Date.now();
+          console.log(`[Alert] PRESIGNAL ${sig.symbol} ${lean} @ ${sig.confidence}% — all gates passed`);
+          sendAlert(Object.assign({
+            type: 'presignal', direction: lean, trigger: trade.entryTrigger,
+            notes: [
+              'This is an early heads-up — NO trade yet.',
+              'Get your capital and broker ready.',
+              'Only enter after it confirms (confidence 60%+).',
+              'Do not pre-empt the trigger.',
+            ],
+          }, base));
+        } else if (failed.length) {
+          console.log(`[Alert] presignal suppressed for ${sig.symbol} ${lean} @ ${sig.confidence}% — failed: ${failed.join(', ')}`);
+        }
+      }
+    }
+    // Higher timeframe (1H) bias for multi-timeframe confirmation
+    async function getMTF(symbol) {
+      const c = await getCandles(symbol, 'ONE_HOUR', 40);
+      if (!c || !c.closes || c.closes.length < 30) return 0;
+      const e9 = EMA(c.closes, 9), e21 = EMA(c.closes, 21);
+      if (e9 == null || e21 == null) return 0;
+      return e9 > e21 ? 1 : e9 < e21 ? -1 : 0;
+    }
+    const _lastLive = {}; // key -> { data, ts }
+    function fmtExp(e) { // 25AUG2026 -> 25 Aug 2026
+      if (!e || e.length < 9) return null;
+      const mm = e.substring(2,5).toUpperCase();
+      return e.substring(0,2) + ' ' + (mm.charAt(0)+mm.slice(1).toLowerCase()) + ' ' + e.substring(5);
+    }
+    async function fetchLivePremium(symbol, expiry, strike, type) {
+      const key = symbol + '|' + (expiry || 'AUTO') + '|' + strike + '|' + type;
+      const q = expiry ? ('&expiry=' + encodeURIComponent(expiry)) : '';
+      const j = await fetchJSON(PROXY + '?action=option_ltp&symbol=' + symbol + q + '&strike=' + strike + '&type=' + type + '&cb=' + Date.now());
+      if (j && j.status && j.data && j.data.ltp) {
+        const quoteTimestamp = Date.parse(j.timestamp || '');
+        const data = Object.assign({}, j.data, {
+          quoteTimestamp: Number.isFinite(quoteTimestamp) ? quoteTimestamp : null,
+        });
+        _lastLive[key] = { data, ts: data.quoteTimestamp || Date.now() };
+        return data;
+      }
+      // A cached quote is display-only and may be returned for at most three
+      // minutes; paper execution separately enforces a 45-second maximum age.
+      const cached = _lastLive[key];
+      if (cached && Date.now() - cached.ts < 180000) return cached.data;
+      return null;
+    }
+
+    const PAPER_EXECUTOR_MODE = new URLSearchParams(location.search).get('paper_executor') === '1';
+    // Per-document identity (not sessionStorage): duplicated tabs can inherit a
+    // sessionStorage value and would then both appear to be the same lease owner.
+    const _leaseOwner = `${PAPER_EXECUTOR_MODE?'tool':'signal'}-${Date.now()}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+    let _leaseHeld = false;
+    async function acquirePaperLease() {
+      try {
+        const response = await postJSON(PROXY + '?action=paper_lease', {
+          owner: _leaseOwner, role: PAPER_EXECUTOR_MODE ? 'tool-executor' : 'signal-page', ttl: 55,
+        });
+        const j = response && typeof response.json === 'function' ? await response.json() : response;
+        const wasHeld = _leaseHeld;
+        _leaseHeld = !!j?.acquired;
+        if (_leaseHeld && !wasHeld) {
+          await paperTrader.refresh();
+          paperTrader._leaseOwnerSeen = _leaseOwner;
+        }
+        paperTrader.setExecutorLease(_leaseHeld ? _leaseOwner : null);
+        godBrain.setExecutorLease(_leaseHeld ? _leaseOwner : null);
+        if (!_leaseHeld) paperTrader._leaseOwnerSeen = null;
+        if (window.parent !== window) window.parent.postMessage({
+          type: 'paper-executor-status', active: _leaseHeld, owner: _leaseOwner,
+          lease: j?.lease || null, timestamp: Date.now(),
+        }, location.origin);
+        return _leaseHeld;
+      } catch (e) {
+        _leaseHeld = false;
+        paperTrader.setExecutorLease(null);
+        godBrain.setExecutorLease(null);
+        return false;
+      }
+    }
+
+    // ── Client-side stateful rules — NO TRADE LIMITS (user requested unlimited) ──
+    const _dayKey = () => new Date().toISOString().split('T')[0];
+    const _sigState = { day: _dayKey(), confirmed: 0, stops: 0 };
+    function checkClientVetoes(sig) {
+      if (_sigState.day !== _dayKey()) { _sigState.day = _dayKey(); _sigState.confirmed = 0; _sigState.stops = 0; }
+      if (sig.direction === 'NO_TRADE') return null;
+      // NO max daily signals limit — user wants unlimited trades
+      // NO circuit breaker — user wants all signals to fire
+      return null;
+    }
+    function recordSignal(sig) { _sigState.confirmed++; }
+    // TODO: call recordStop() when a stop is hit (needs trade tracking)
+
+    // Market status
+    (function ms(){ var i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'})); var d=i.getDay(),t=i.getHours()*60+i.getMinutes(); var e=document.getElementById('mkt-t'),b=document.getElementById('mkt'); if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';} else if(t>=555&&t<=930){e.textContent='MARKET OPEN';b.className='market-status-badge open';} else {e.textContent='CLOSED';b.className='market-status-badge closed';} setTimeout(ms,30000); })();
+
+    // Populate selector
+    const sel = document.getElementById('sym');
+    INSTRUMENTS.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+    sel.addEventListener('change', () => run());
+
+    window.run = run;
+    window.runAI = runAI;
+
+    // ═══ SIGNAL LOCK — hysteresis state machine ══════════════════════════════
+    // Problem: confidence sits right on the 60% line (live Aug-21 data showed 60.6
+    // over and over), so a bare threshold flipped the card CONFIRMED -> NO TRADE ->
+    // CONFIRMED on every 10s refresh. That is untradeable.
+    // Fix: a Schmitt trigger. Enter at >=60, but stay confirmed until <52, and hold
+    // for a 5-minute floor unless the setup is genuinely invalidated.
+    const SIGLOCK = { ENTER: 60, EXIT: 52, HOLD_MS: 5 * 60 * 1000 };
+    // The lock lives on the SERVER (inside god_state), not in browser storage, so
+    // desktop and mobile agree on whether a signal is currently locked.
+    let _sigLock = null;
+    function _loadLock() { _sigLock = godBrain.getSignalLock(); }
+    function _saveLock() { if (_leaseHeld) godBrain.setSignalLock(_sigLock); }
+    function lockRemainingMs() { return _sigLock ? Math.max(0, _sigLock.until - Date.now()) : 0; }
+    function lockActive() { return !!_sigLock && Date.now() < _sigLock.until; }
+
+    function applySignalLock(sig, snap) {
+      const now = Date.now();
+      const mtf = snap.mtfBias || 0;
+
+      if (_sigLock && now > _sigLock.until) { _sigLock = null; _saveLock(); } // expired
+
+      if (_sigLock && _sigLock.symbol === sig.symbol) {
+        const dir = _sigLock.direction;
+        // Real invalidations — these SHOULD kill the lock early.
+        const mtfAgainst = (dir === 'BUY' && mtf < 0) || (dir === 'SELL' && mtf > 0);
+        const slHit = !!(_sigLock.stop && snap.livePremium && snap.livePremium <= _sigLock.stop);
+        const collapsed = sig.confidence < SIGLOCK.EXIT;
+
+        if (mtfAgainst || slHit || collapsed) {
+          sig._lockBroken = mtfAgainst ? '1H trend flipped against the signal'
+            : slHit ? 'Stop-loss level was hit'
+            : 'Confidence collapsed below ' + SIGLOCK.EXIT + '%';
+          _sigLock = null; _saveLock();
+        } else {
+          // HOLD — keep it confirmed even though the raw score dipped under 60.
+          if (sig.direction === 'NO_TRADE' && sig.confidence >= SIGLOCK.EXIT) {
+            sig.direction = dir;
+            if (!sig.optionTrade && sig.watchTrade) sig.optionTrade = sig.watchTrade;
+            sig.verdict = dir + ' — SIGNAL HELD (locked, ' + Math.ceil(lockRemainingMs() / 60000) + 'm left)';
+            sig._held = true;
+          }
+          sig._lockedUntil = _sigLock.until;
+          sig._lockRemainMs = lockRemainingMs();
+          return sig;
+        }
+      }
+
+      // Arm a new lock on a fresh confirmation.
+      if (_leaseHeld && !_sigLock && sig.direction !== 'NO_TRADE' && sig.confidence >= SIGLOCK.ENTER) {
+        const t = sig.optionTrade || sig.watchTrade || {};
+        _sigLock = {
+          symbol: sig.symbol, direction: sig.direction, until: now + SIGLOCK.HOLD_MS,
+          strike: t.strike || null, type: t.type || null,
+          stop: (t.stopLoss && t.stopLoss.premium) ? t.stopLoss.premium : null,
+          mtfAtEntry: mtf, armedAt: now,
+        };
+        _saveLock();
+        sig._lockedUntil = _sigLock.until;
+        sig._lockRemainMs = SIGLOCK.HOLD_MS;
+      }
+      return sig;
+    }
+
+    async function run(silent) {
+      // Brain + paper state are server-side now, so make sure they have arrived
+      // BEFORE anything reads them. applySignalLock() below reads the lock out of
+      // brain state, and the paper trader acts on active positions — both would
+      // otherwise see empty defaults on the first pass and then persist that over
+      // the real server state.
+      try { await godBrain.ready(); } catch (e) {}
+      _loadLock();
+
+      let _paperLeader = false;
+      const symbol = sel.value;
+      const out = document.getElementById('out');
+      if (!silent) out.innerHTML = '<div class="loading-overlay"><div class="spinner"></div><span>Fetching live data & computing signal for ' + symbol + '...</span></div>';
+      try {
+        const snap = await buildSnapshot(symbol);
+        if (!snap) { if (!silent) out.innerHTML = closed(symbol); return; }
+        const isIdx = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'].includes(symbol);
+
+        // Enrich every F&O symbol with the exact listed expiry/lot/strike metadata.
+        // GEX remains index-only because dealer-chain aggregation is not available
+        // for the stock universe through the same endpoint.
+        const [meta, fii, news, mtf, gexResp] = await Promise.all([
+          getChainMeta(symbol, snap.ltp),
+          fetchJSON(PROXY + '?action=fiidii'),
+          fetchJSON(PROXY + '?action=news&symbol=' + symbol),
+          getMTF(symbol),
+          isIdx ? fetchJSON(PROXY + '?action=gex&symbol=' + symbol) : Promise.resolve(null),
+        ]);
+        if (meta) {
+          snap.iv = meta.iv; snap.ivSkew = meta.ivSkew; snap.expiry = meta.expiry;
+          snap.expiryDisplay = meta.expiryDisplay; snap.dte = meta.dte;
+          if (meta.lotSize) snap.lotSize = meta.lotSize;
+          if (meta.strikeStep) snap.strikeStep = meta.strikeStep;
+          snap.instrumentType = meta.instrumentType;
+        }
+        if (fii && fii.status && fii.data) snap.fiiFlow = fii.data.fii;
+        if (news && news.status && news.data) snap.newsSentiment = news.data.sentiment;
+        snap.mtfBias = mtf;
+        if (gexResp && gexResp.status && gexResp.data) {
+          snap.gex = gexResp.data;
+          // Wire PCR from GEX (OI-based) into snapshot root so the Options component uses it
+          if (gexResp.data.pcr && gexResp.data.pcr > 0) snap.pcr = gexResp.data.pcr;
+          // Wire avgIV from GEX (real chain IV) if option_chain meta didn't provide one
+          if (!snap.iv && gexResp.data.avgIV) snap.iv = gexResp.data.avgIV / 100;
+        }
+
+        let sig = generateSignal(snap, { confidenceThreshold: 60 });
+        const _mktClosed = /market closed/i.test(String(sig.reason || '') + ' ' + String(sig.verdict || ''));
+
+        // Client-side vetoes (stateful: max daily signals, circuit breaker)
+        const clientVeto = checkClientVetoes(sig);
+        if (clientVeto) {
+          sig.vetoes = sig.vetoes || [];
+          sig.vetoes.push(clientVeto);
+          sig.direction = 'NO_TRADE';
+          sig.reason = clientVeto;
+          sig.verdict = 'NO TRADE — ' + sig.symbol + ': ' + clientVeto;
+        }
+
+        // Resolve an exact LIVE contract for indices and stocks. If ATM exceeds
+        // ₹20,000/lot, walk OTM and select the first liquid affordable contract.
+        const t0 = sig.optionTrade || sig.watchTrade;
+        if (t0) {
+          const step = Number(snap.strikeStep) || Number(t0.strikeStep) || 50;
+          const lot = Number(snap.lotSize) || Number(t0.lotSize) || 50;
+          const candidates = [Number(t0.strike)];
+          for (let i = 1; i <= 6; i++) candidates.push(Number(t0.strike) + (t0.type === 'CE' ? i * step : -i * step));
+          let firstLive = null, chosen = null, chosenEligible = false;
+          for (const strike of candidates) {
+            if (!(strike > 0)) continue;
+            const lp = await fetchLivePremium(symbol, snap.expiry || '', strike, t0.type);
+            if (!lp || !(Number(lp.ltp) > 0)) continue;
+            const candidate = { strike, lp };
+            if (!firstLive) firstLive = candidate;
+            const quotedLot = Number(lp.lotSize) || lot;
+            const affordable = Number(lp.ltp) * quotedLot <= 20000;
+            const liquid = lp.volume == null || Number(lp.volume) > 0;
+            if (affordable && liquid) { chosen = candidate; chosenEligible = true; break; }
+          }
+          chosen = chosen || firstLive;
+          if (chosen) {
+            const { lp, strike } = chosen;
+            snap.contractEligible = chosenEligible;
+            snap.livePremium = Number(lp.ltp);
+            snap.livePremiumOpen = lp.open || null;
+            snap.liveQuoteAt = Number.isFinite(Number(lp.quoteTimestamp))
+              ? Number(lp.quoteTimestamp)
+              : null;
+            snap.optionStrike = strike;
+            if (lp.lotSize) snap.lotSize = Number(lp.lotSize);
+            if (lp.strikeStep) snap.strikeStep = Number(lp.strikeStep);
+            if (lp.expiry) { snap.expiry = lp.expiry; snap.expiryDisplay = fmtExp(lp.expiry); }
+            const lean = sig.direction !== 'NO_TRADE' ? sig.direction : (sig.netScore >= 0 ? 'BUY' : 'SELL');
+            const atr = sig.atr || (snap.ltp * 0.012);
+            const rebuilt = buildOptionTrade(lean, symbol, snap.ltp, atr, snap, sig.direction !== 'NO_TRADE');
+            if (sig.direction !== 'NO_TRADE') sig.optionTrade = rebuilt; else sig.watchTrade = rebuilt;
+            sig._liveOpt = Object.assign({}, lp, {
+              strike, type: t0.type, quoteTimestamp: snap.liveQuoteAt,
+              affordable: Number(lp.ltp) * Number(snap.lotSize) <= 20000,
+              liquid: lp.volume == null || Number(lp.volume) > 0,
+              eligible: chosenEligible,
+            });
+            if (Number(rebuilt.strike) !== Number(strike) || rebuilt.type !== t0.type) {
+              console.warn(`[Live] quote was for ${strike}${t0.type} but rebuilt plan differs — discarding quote`);
+              sig._liveOpt = null; snap.livePremium = null; snap.liveQuoteAt = null;
+            }
+          }
+        }
+
+        // Establish leadership before any shared lock, pattern, outcome, alert,
+        // or paper-state mutation. Viewer tabs still compute/render diagnostics.
+        _paperLeader = await acquirePaperLease();
+
+        // Apply the hysteresis lock AFTER live premium is known (the stop check
+        // needs snap.livePremium) but BEFORE the signal is published/rendered.
+        sig = applySignalLock(sig, snap);
+        // A held signal may have started this cycle on the NO_TRADE path, whose
+        // watch plan is intentionally non-executable. Rebuild only after the lock
+        // legitimately restores direction and only if the quote remains fresh/live.
+        if (sig.direction !== 'NO_TRADE' && sig._held && snap.livePremium && snap.liveQuoteAt) {
+          sig.optionTrade = buildOptionTrade(sig.direction, symbol, snap.ltp,
+            sig.atr || snap.ltp * 0.012, snap, true);
+        }
+
+        currentSignal = sig;
+
+        // ═══ GOD MODE PROCESSING ═══════════════════════════════════════════
+        // Process through all 51 capabilities: evidence chain, 7-stage confidence,
+        // velocity tracking, regime shift detection, risk shield, option intelligence,
+        // alert engine, pattern memory, self-improvement.
+        const godResult = godBrain.process(sig, snap, { persist: _paperLeader });
+        const gm = godResult.godMode;
+
+        // Store for God Mode Dashboard (sessionStorage survives page refresh)
+        // Publish to the SERVER, not sessionStorage. sessionStorage is per-tab, so
+        // opening god-dashboard.html in a different browser or on mobile found
+        // nothing and rendered zeros — the exact "Brain Status showing Zero in a
+        // new browser" problem. Now any device sees the same last signal.
+        if (_paperLeader) godBrain.recordLastSignal(gm);
+
+        // Use God Mode confidence if available (overrides raw engine confidence for display)
+        if (gm.godConfidence != null && !_mktClosed) {
+          sig._rawConfidence = sig.confidence;
+          sig._godConfidence = gm.godConfidence;
+          sig._godVerdict = gm.verdict;
+          sig._godEvidence = gm.evidence;
+          sig._godAlert = gm.alert;
+          sig._godActionable = gm.actionable;
+          sig._regimeShift = gm.regimeShift;
+          sig._positionSize = gm.positionSize;
+          sig._optimalStrike = gm.optimalStrike;
+          sig._premiumCeiling = gm.premiumCeiling;
+          sig._ivRegime = gm.ivRegime;
+          sig._hedge = gm.hedge;
+          sig._historicalWR = gm.historicalWinRate;
+          sig._historicalMatches = gm.historicalMatches;
+          sig._modelConfidence = gm.modelConfidence;
+          sig._calibration = gm.calibration;
+          sig._patternId = gm.patternId;
+        }
+
+        // Adjust scan interval based on God Mode alert state
+        if (gm.alert && gm.alert.stage >= 1 && godBrain.scanInterval !== _currentInterval) {
+          _currentInterval = godBrain.scanInterval;
+          clearInterval(_refreshTimer);
+          _refreshTimer = setInterval(() => refreshNow(true), _currentInterval);
+          console.log(`[GodMode] Rapid scan: ${_currentInterval/1000}s`);
+        }
+        // ═══════════════════════════════════════════════════════════════════
+
+        // ═══ AI PAPER TRADING — Auto-Execute ═══════════════════════════════
+        // On every signal (confirmed or rejected), the paper trader acts:
+        // - Confirmed signal → auto-executes paper trade
+        // - Rejected signal → shadow-records for veto validation
+        // - Every refresh → updates active positions with live premium
+        try {
+          // Paper state now lives on the SERVER, not localStorage, so it arrives
+          // asynchronously. Wait for it before touching positions — acting on the
+          // empty default state would re-open trades that are already open and
+          // then overwrite the server copy, losing real active positions.
+          await paperTrader.ready();
+          await godBrain.ready(); // brain state is server-side now, not localStorage
+          _paperLeader = _paperLeader && await acquirePaperLease();
+          if (_paperLeader) {
+            // Requote every active position by its own contract before evaluating a
+            // new entry. This no longer depends on the currently selected signal.
+            const monitorResults = await paperTrader.monitorActivePositions(acquirePaperLease);
+            const monitorFailures = monitorResults.filter(x => !x.updated);
+            if (monitorFailures.length) console.warn('[PaperTrade] Active quote failures:', monitorFailures);
+
+            if (!(await acquirePaperLease())) throw new Error('Executor lease lost before entry evaluation');
+
+          // Debug: log what paper trader receives
+          console.log(`[PaperTrade] Signal: dir=${sig.direction}, conf=${sig.confidence}, optionTrade=${!!sig.optionTrade}, watchTrade=${!!sig.watchTrade}, livePrem=${snap.livePremium || 'none'}`);
+          const ptResult = paperTrader.autoExecute(sig, snap, gm);
+          if (ptResult.executed) {
+            console.log(`[PaperTrade] EXECUTED: ${sig.direction} ${sig.symbol} via ${ptResult.strategy} | slippage ₹${ptResult.slippage?.entrySlippage || 0}`);
+          } else if (ptResult.shadowRecorded) {
+            console.log(`[PaperTrade] Shadow recorded: ${ptResult.reason}`);
+          }
+
+          // Active positions were already requoted above by exact contract. The
+          // current signal quote is not reused for unrelated positions.
+
+          // End-of-day: force close at 3:20 PM + generate prediction
+          const _istNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+          const _minNow = _istNow.getHours() * 60 + _istNow.getMinutes();
+          if (_minNow >= 920 && paperTrader.state.active.length > 0) {
+            if (!(await acquirePaperLease())) throw new Error('Executor lease lost before end-of-day handling');
+            const eod = paperTrader.forceCloseAll('End of day 3:20 PM');
+            if (eod.closed.length) console.log(`[PaperTrade] End-of-day: ${eod.closed.length} position(s) closed on fresh exact quotes`);
+            if (eod.pending.length) console.warn(`[PaperTrade] End-of-day: ${eod.pending.length} position(s) require reconciliation; no synthetic exit was booked`);
+          }
+          if (_minNow >= 930 && _minNow <= 935) {
+            paperTrader.generateEndOfDayReport();
+          }
+          } else {
+            console.log('[PaperTrade] Read-only: another tab/device holds the executor lease');
+          }
+        } catch (ptErr) { console.warn('[PaperTrade] Error:', ptErr.message); }
+        // ═══════════════════════════════════════════════════════════════════
+
+        // Render is isolated so a display fault cannot take down the rest of the
+        // cycle. Previously a throw inside render() (e.g. reading probabilities.hitT1
+        // on a held NO_TRADE signal) escaped to the outer catch, which also skipped
+        // maybeAlert() and ingestToBrain() — so one missing field silently stopped
+        // alerting and brain logging, and left the page showing stale markup.
+        try {
+          render(sig, out);
+        } catch (rErr) {
+          console.error('[Render] failed:', rErr);
+          out.innerHTML = '<div class="card" style="border-color:var(--danger)">'
+            + '<div class="font-bold text-red">Display error</div>'
+            + '<div class="text-xs text-muted" style="margin-top:0.3rem">' + (rErr && rErr.message ? rErr.message : String(rErr)) + '</div>'
+            + '<div class="text-xs text-muted" style="margin-top:0.3rem">The signal itself was computed — this is a rendering fault. '
+            + 'Direction <b>' + sig.direction + '</b>, confidence <b>' + sig.confidence + '%</b>. It will retry on the next refresh.</div></div>';
+        }
+        if (sig.direction !== 'NO_TRADE') recordSignal(sig);
+        if (_paperLeader && _leaseHeld) {
+          maybeAlert(sig, snap);
+          // Only the executor writes pattern input; viewer tabs cannot duplicate
+          // samples or race a full-state learning snapshot.
+          ingestToBrain(symbol, snap, sig).catch(() => {});
+        }
+
+        // ── SignalsBrain Integration: executor-only above ──
+      } catch (e) {
+        if (!silent) out.innerHTML = '<div class="card" style="text-align:center;padding:2rem"><p class="text-red">Error: ' + e.message + '</p></div>';
+      }
+    }
+
+    // ── Auto-pick strongest index among the 4 ──
+    const AUTO_INDICES = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'];
+    async function pickBest(silent) {
+      const out = document.getElementById('out');
+      // A locked signal outranks the scan — never switch instrument out from under a
+      // live confirmed trade. Also skips 4 redundant API scans while the lock holds.
+      try { await godBrain.ready(); } catch (e) {}
+      _loadLock();
+      if (lockActive()) { sel.value = _sigLock.symbol; await run(silent); return; }
+      if (!silent) out.innerHTML = '<div class="loading-overlay"><div class="spinner"></div><span>Scanning NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY for the strongest signal...</span></div>';
+      const results = [];
+      for (const s of AUTO_INDICES) {
+        try {
+          const snap = await buildSnapshot(s, false); // candles only — fast ranking
+          if (!snap) continue;
+          snap.mtfBias = await getMTF(s);
+          const sig = generateSignal(snap, { confidenceThreshold: 60 });
+          const mtfAligned = !snap.mtfBias || (sig.netScore >= 0 ? snap.mtfBias > 0 : snap.mtfBias < 0);
+          const rank = (sig.direction !== 'NO_TRADE' ? 1000 : 0) + sig.confidence
+            + Math.abs(sig.netScore) * 0.1 + (mtfAligned ? 8 : -18);
+          results.push({ symbol: s, rank, actionable: sig.direction !== 'NO_TRADE' });
+        } catch (e) {}
+        await new Promise(f => setTimeout(f, 250));
+      }
+      if (results.length) {
+        results.sort((a, b) => b.rank - a.rank);
+        let chosen = results[0].symbol;
+        // STICKINESS: mild anti-chatter only. The old band was 80 points, but
+        // actionable adds +1000 and confidence is 0-100, so 80 pts meant an incumbent
+        // at 55% outranked a challenger at 95% — that is exactly why 137/137 signals
+        // on Aug 21 were MIDCPNIFTY and NIFTY never got a look. 12 pts is enough to
+        // damp noise without pinning the scanner to one index.
+        const cur = currentSignal && currentSignal.symbol;
+        if (cur) {
+          const curR = results.find(r => r.symbol === cur);
+          // Only hold the incumbent if it is actionable AND genuinely close to the best.
+          if (curR && curR.actionable && (results[0].rank - curR.rank) <= 12) chosen = cur;
+        }
+        sel.value = chosen;
+      }
+      await run(silent);
+    };
+
+    function closed(sym) {
+      return '<div class="card" style="text-align:center;padding:3rem"><p style="font-size:1.5rem"></p><p class="text-muted" style="font-size:1rem;margin:0.5rem 0">No Live Data for ' + sym + '</p><p class="text-xs text-muted">Historical candle data unavailable. This can happen outside market hours or for illiquid symbols. Try NIFTY / BANKNIFTY, or use <a href="tool.html">Tools</a>.</p></div>';
+    }
+
+    function gauge(v, color, size=140){ const r=(size-20)/2, c=2*Math.PI*r, off=c-(v/100)*c; return '<div class="gauge-container" style="width:'+size+'px;height:'+size+'px"><svg width="'+size+'" height="'+size+'"><circle class="gauge-bg" cx="'+size/2+'" cy="'+size/2+'" r="'+r+'"/><circle class="gauge-fill" cx="'+size/2+'" cy="'+size/2+'" r="'+r+'" stroke="'+color+'" stroke-dasharray="'+c+'" stroke-dashoffset="'+off+'"/></svg><div class="gauge-value" style="color:'+color+'">'+v.toFixed(0)+'%</div></div>'; }
+    function pbar(label,v,color){ return '<div class="flex items-center gap-1 mb-1"><span class="text-xs" style="width:55px">'+label+'</span><div class="progress-bar" style="flex:1"><div class="fill '+color+'" style="width:'+v+'%"></div></div><span class="num text-xs" style="width:35px;text-align:right">'+v+'%</span></div>'; }
+
+    /**
+     * Score agreement across independent reads of the same market.
+     * Returns the verdict so both the headline and the panel use one source.
+     */
+    function computeCoherence(s) {
+      const st = s.strategy || {}, gx = st.gex || {};
+      const reads = [];
+      const dirOf = v => v > 0 ? 1 : v < 0 ? -1 : 0;
+
+      reads.push({ name: 'Engine score', v: dirOf(s.netScore),
+                   detail: (s.netScore >= 0 ? '+' : '') + s.netScore });
+      if (st.adx != null && st.plusDI != null && st.minusDI != null) {
+        reads.push({ name: 'Directional index', v: dirOf(st.plusDI - st.minusDI),
+                     detail: '+DI ' + st.plusDI + ' / -DI ' + st.minusDI });
+      }
+      if (st.mtf && st.mtf !== 'n/a') {
+        reads.push({ name: 'Higher timeframe (1H)', v: st.mtf === 'Bullish' ? 1 : -1, detail: st.mtf });
+      }
+      if (gx.flip && s.ltp) {
+        reads.push({ name: 'Dealer gamma flip', v: dirOf(s.ltp - gx.flip),
+                     detail: 'spot ' + (s.ltp >= gx.flip ? 'above' : 'below') + ' ' + gx.flip });
+      }
+      if (st.orb && /up|down/i.test(String(st.orb.state || st.orb))) {
+        const up = /up/i.test(String(st.orb.state || st.orb));
+        reads.push({ name: 'Opening range', v: up ? 1 : -1, detail: String(st.orb.state || st.orb) });
+      }
+      if (s._godConfidence != null) {
+        // God Mode expresses conviction, not direction. A low score is a vote
+        // against acting, not a vote for the opposite side. Rounded — it was
+        // rendering raw floats like "30.158%".
+        const gc = Math.round(s._godConfidence);
+        reads.push({ name: 'God Mode conviction', v: gc >= 60 ? dirOf(s.netScore) : 0,
+                     detail: gc + '%' + (gc < 60 ? ' (too low to endorse)' : '') });
+      }
+
+      const voting = reads.filter(r => r.v !== 0);
+      const bull = voting.filter(r => r.v > 0).length;
+      const bear = voting.filter(r => r.v < 0).length;
+      const total = voting.length;
+      const align = total ? Math.round(Math.max(bull, bear) / total * 100) : 0;
+      const noData = total === 0;
+      const lean = bull > bear ? 'BULLISH' : bear > bull ? 'BEARISH' : 'SPLIT';
+      const conflicted = !noData && (align < 70 || (bull > 0 && bear > 0 && Math.min(bull, bear) >= 2));
+      return { reads, bull, bear, total, align, lean, conflicted, noData };
+    }
+
+    function render(s, out) {
+      const dc = s.direction === 'BUY' ? 'buy' : s.direction === 'SELL' ? 'sell' : 'no-trade';
+      const col = s.direction === 'BUY' ? 'var(--primary)' : s.direction === 'SELL' ? 'var(--danger)' : 'var(--text-muted)';
+      const actionable = s.direction !== 'NO_TRADE';
+      const trade = actionable ? s.optionTrade : s.watchTrade;
+      const contractReady = !!(actionable && trade && trade.executable && trade.premiumSource === 'live'
+        && trade.expiry && s._liveOpt && Number(s._liveOpt.ltp) > 0);
+      const executable = !!(contractReady && s._godActionable === true);
+      const executionBlockReason = !contractReady
+        ? 'The exact listed expiry and a fresh matching live premium are not both verified.'
+        : (s._godVerdict || 'God Mode quality gates did not mark this setup actionable.');
+
+      // Coherence is computed FIRST so the headline can defer to it. Otherwise the
+      // page prints "Bullish" off netScore alone directly above a panel stating the
+      // reads disagree — which is exactly what it was doing.
+      const COH = computeCoherence(s);
+      const marketClosed = /market closed/i.test(String(s.reason || '') + ' ' + String(s.verdict || ''));
+      const trend = (s.trendLabel || 'Neutral') + (marketClosed ? ' (market closed)' : COH.conflicted ? ' (contested)' : COH.noData ? ' (no live signal)' : '');
+      const trendCls = (marketClosed || COH.noData) ? 'text-muted' : COH.conflicted ? 'text-amber' : (s.netScore >= 0 ? 'text-green' : 'text-red');
+
+      // ── Top banner ──
+      const badgeText = !actionable ? 'NO TRADE' : executable ? s.direction : s.direction + ' BIAS';
+      let h = '<div class="card" style="padding:1rem 1.25rem"><div class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.5rem">';
+      h += '<div class="flex items-center gap-2"><span class="signal-badge '+dc+'" style="font-size:1rem;padding:0.5rem 1rem">'+badgeText+'</span><span class="font-bold">'+s.symbol+'</span><span class="text-muted num">@ ₹'+fmt(s.ltp)+'</span></div>';
+      h += '<div class="text-sm">Model score <span class="font-bold" style="color:'+col+'">'+s.confidence+'%</span> · <span class="'+trendCls+'">'+trend+'</span></div>';
+      h += '</div><div class="progress-bar mt-1"><div class="fill '+(s.netScore>=0?'green':'red')+'" style="width:'+Math.min(100,Math.abs(s.netScore))+'%"></div></div>';
+
+      // ── SIGNAL COHERENCE ──────────────────────────────────────────────────
+      // The headline used to read "Bullish" off netScore alone while the panels
+      // below it said 1H Bearish, spot BELOW the zero-gamma flip, and MTF MIXED.
+      // Six independent reads are now scored for agreement and a single verdict is
+      // stated. Disagreement is the most useful thing this page can tell you, so
+      // it is no longer buried in a grid three screens down.
+      (function coherencePanel() {
+        const { reads, bull, bear, total, align, lean, conflicted, noData } = COH;
+        const dim = marketClosed || noData;
+        const c0 = dim ? 'var(--text-muted, #94a3b8)'
+                 : conflicted ? 'var(--accent, #f59e0b)'
+                 : lean === 'BULLISH' ? 'var(--primary)' : 'var(--danger)';
+        const label = marketClosed ? 'MARKET CLOSED — no live signal'
+                    : noData ? 'NO DIRECTIONAL SIGNAL — no live edge'
+                    : conflicted ? 'CONFLICTED — signals disagree'
+                    : lean + ' — signals aligned';
+
+        h += '<div class="mt-1" style="padding:0.6rem 0.75rem;border-radius:8px;border:1px solid '+c0+';background:rgba(148,163,184,0.05)">';
+        h += '<div class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.4rem">';
+        h += '<span class="font-bold" style="color:'+c0+';font-size:0.85rem">'+label+'</span>';
+        h += '<span class="text-xs text-muted">'+(dim ? (bull+' bullish / '+bear+' bearish of '+reads.length+' reads · none point either way') : ('agreement <b>'+align+'%</b> · '+bull+' bullish / '+bear+' bearish of '+total+' directional read'+(total===1?'':'s')))+'</span>';
+        h += '</div>';
+        h += '<div class="mt-1" style="display:flex;flex-wrap:wrap;gap:0.3rem">';
+        for (const r of reads) {
+          const c = r.v > 0 ? 'text-green' : r.v < 0 ? 'text-red' : 'text-muted';
+          const arrow = r.v > 0 ? '▲' : r.v < 0 ? '▼' : '•';
+          h += '<span class="text-xs" style="padding:0.15rem 0.45rem;border-radius:999px;border:1px solid var(--border,#1f2937)">'
+             + '<span class="'+c+'">'+arrow+'</span> '+r.name+' <span class="text-muted">'+r.detail+'</span></span>';
+        }
+        h += '</div>';
+        if (marketClosed) {
+          h += '<div class="text-xs mt-1 text-muted">The market is closed. Figures above are from the last session — signals are generated only during market hours (09:15–15:30 IST, Mon–Fri).</div>';
+        } else if (noData) {
+          h += '<div class="text-xs mt-1 text-muted">No independent read currently points in a direction, so there is no directional edge to act on — an absence of signal, not a conflict.</div>';
+        } else if (conflicted) {
+          h += '<div class="text-xs mt-1" style="color:var(--accent,#f59e0b)">When independent reads disagree this badly, the edge is not directional — it is noise. '
+             + 'The safest action is no action until they line up.</div>';
+        }
+        h += '</div>';
+      })();
+      // ── SIGNAL VALIDITY (lock) — so a confirmed signal never silently vanishes ──
+      if (s._lockRemainMs > 0) {
+        const mm = Math.floor(s._lockRemainMs/60000), ss = Math.floor((s._lockRemainMs%60000)/1000);
+        h += '<div class="mt-1 text-xs" style="padding:0.5rem 0.7rem;border-radius:6px;background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.35)">'
+           + '<span class="font-bold text-green">🔒 SIGNAL LOCKED &amp; VALID</span> — held for <span class="num font-bold">'+mm+'m '+(ss<10?'0':'')+ss+'s</span> more. '
+           + 'It will not flip to NO TRADE during this window.'
+           + (s._held ? ' <span class="text-muted">(raw score dipped, lock is holding it)</span>' : '')
+           + '<br><span class="text-muted">Breaks early only if: 1H trend flips against it, or the stop is hit.</span></div>';
+      } else if (s._lockBroken) {
+        h += '<div class="mt-1 text-xs" style="padding:0.5rem 0.7rem;border-radius:6px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.35)">'
+           + '<span class="font-bold text-red">SIGNAL INVALIDATED</span> — '+s._lockBroken+'. Exit / do not enter.</div>';
+      }
+      h += '</div>';
+
+      // ── OPTION TRADE BOX (the key part) ──
+      if (trade) {
+        const border = actionable ? col : 'var(--accent)';
+        const bg = actionable ? (s.direction==='BUY'?'rgba(16,185,129,0.06)':'rgba(239,68,68,0.06)') : 'rgba(59,130,246,0.06)';
+        h += '<div class="card mt-2" style="border-color:'+border+';background:'+bg+'">';
+        // Contract header + a LIVE GRAPH button that opens the actual option-contract
+        // chart (not the index) so the user can see the premium they'd trade.
+        const _gexp = trade.expiry || s.expiry || trade.expiryDisplay || '';
+        const _graphUrl = 'chart.html?opt=1&symbol=' + encodeURIComponent(s.symbol)
+                        + '&strike=' + encodeURIComponent(trade.strike)
+                        + '&type=' + encodeURIComponent(trade.type)
+                        + (_gexp ? '&expiry=' + encodeURIComponent(_gexp) : '');
+        h += '<div class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.5rem;margin-bottom:0.5rem">';
+        h += '<div style="font-size:1.15rem;font-weight:700">'+s.symbol+' '+trade.strike+' '+trade.type+(trade.expiryDisplay?' · Expiry '+trade.expiryDisplay:'')+'</div>';
+        h += '<a href="'+_graphUrl+'" target="_blank" rel="noopener" class="signal-badge" style="text-decoration:none;font-size:0.72rem;padding:0.3rem 0.7rem;border:1px solid var(--primary);color:var(--primary);background:var(--primary-dim)">📈 Live Graph</a>';
+        h += '</div>';
+        if (!actionable) {
+          const bias = s.netScore >= 0 ? 'bullish' : 'bearish';
+          const instr = trade.type === 'CE' ? 'a Call (CE)' : 'a Put (PE)';
+          const dirWord = trade.type === 'CE' ? 'rises and holds ABOVE' : 'falls and holds BELOW';
+          h += '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);border-radius:6px;padding:0.6rem 0.8rem;margin-bottom:0.6rem">';
+          h += '<div class="font-bold text-amber" style="font-size:0.92rem">PREVIEW ONLY — NO ACTIVE TRADE</div>';
+          h += '<p class="text-sm" style="margin-top:0.3rem">Market is <strong>'+bias+'</strong> but '+(s.vetoes&&s.vetoes.length?'<strong>blocked by safety rules</strong> below':'confidence is only <strong>'+s.confidence+'%</strong>')+'.'+(s.strategy&&s.strategy.regime==='Choppy'?' Market is <strong>choppy/range-bound</strong> (low ADX).':'')+' <strong>Do NOT buy anything right now.</strong></p>';
+          // On a low-conviction / rangebound session, NO TRADE is the system working —
+          // not a fault. Say so plainly, with how far the best read is from firing, so a
+          // flat day is not mistaken for a broken feed. Forcing a trade into chop is
+          // exactly what produces losses.
+          {
+            const _reg = (s.strategy && s.strategy.regime) || '—';
+            const _gap = Math.max(0, 60 - (s.confidence || 0));
+            h += '<p class="text-xs" style="margin-top:0.4rem;color:#93a4bd;border-top:1px solid rgba(245,158,11,0.25);padding-top:0.4rem">'
+               + 'Regime: <strong>'+_reg+'</strong> · strongest read is <strong>'+_gap+' point'+(_gap===1?'':'s')+'</strong> below the 60% trade line. '
+               + 'When the market has no clear direction, staying flat is deliberate capital protection — the engine is live and scanning every 10s, it simply has no edge worth your money right now.</p>';
+          }
+          h += '<p class="text-sm" style="margin-top:0.3rem">The table below is a <strong>simulation</strong> of what '+instr+' trade <em>would</em> look like <strong>IF</strong> '+s.symbol+' '+dirWord+' <strong>'+trade.entryTrigger+'</strong>. Watch that level — act only when a confirmed signal shows here.</p>';
+          h += '</div>';
+        } else {
+          const instr = trade.type === 'CE' ? 'CALL (CE) — bullish' : 'PUT (PE) — bearish';
+          if (executable) {
+            h += '<div style="background:'+(s.direction==="BUY"?"rgba(16,185,129,0.12)":"rgba(239,68,68,0.12)")+';border:1px solid '+col+';border-radius:6px;padding:0.6rem 0.8rem;margin-bottom:0.6rem">';
+            h += '<div class="flex items-center gap-2" style="flex-wrap:wrap"><span class="font-bold" style="color:'+col+';font-size:0.92rem">ACTIVE '+s.direction+' SIGNAL — buy '+instr+'</span><span class="signal-badge '+dc+'" style="font-size:0.7rem;padding:0.15rem 0.5rem">● BUY NOW · LIVE CONTRACT</span></div>';
+            h += '<p class="text-sm" style="margin-top:0.4rem">Buy <strong>'+s.symbol+' '+trade.strike+' '+trade.type+'</strong> at <strong>₹'+trade.livePremium+'</strong> <span class="text-green text-xs">(LIVE)</span> (₹'+trade.capitalPerLot+'/lot of '+trade.lotSize+').</p>';
+            h += '<p class="text-sm" style="margin-top:0.3rem">'+trade.entryCondition+'</p>';
+            h += '<p class="text-xs text-muted" style="margin-top:0.4rem;border-top:1px solid var(--border);padding-top:0.4rem">Executable only while this exact listed expiry and live quote remain fresh. The paper engine rechecks all gates before opening.</p>';
+            h += '</div>';
+          } else {
+            h += '<div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.5);border-radius:6px;padding:0.6rem 0.8rem;margin-bottom:0.6rem">';
+            h += '<div class="font-bold text-amber">DIRECTIONAL SIGNAL — CONTRACT NOT EXECUTABLE</div>';
+            h += '<p class="text-sm" style="margin-top:0.35rem">The '+s.direction+' market view is active, but execution is blocked: <strong>'+executionBlockReason+'</strong> Do not buy at an unverified or quality-gated price.</p>';
+            h += '<p class="text-xs text-muted" style="margin-top:0.3rem">'+trade.entryCondition+'</p></div>';
+          }
+        }
+
+        // Show active vetoes (why the signal was blocked)
+        if (!actionable && s.vetoes && s.vetoes.length > 0) {
+          h += '<div style="margin-top:0.5rem;padding:0.5rem 0.7rem;background:rgba(239,68,68,0.06);border-left:3px solid var(--danger);border-radius:4px">';
+          h += '<div class="text-xs font-bold text-red" style="margin-bottom:0.3rem">BLOCKED BY SAFETY RULES:</div>';
+          s.vetoes.forEach(v => { h += '<div class="text-xs text-muted" style="margin:2px 0">• ' + v + '</div>'; });
+          h += '</div>';
+        }
+
+        // Live premium badge
+        if (trade.premiumSource === 'live') {
+          const lo = s._liveOpt;
+          h += '<div class="flex items-center gap-2 mb-1" style="flex-wrap:wrap"><span class="num font-bold text-green" style="font-size:1.35rem"><span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--primary);margin-right:5px;vertical-align:middle"></span>LIVE ₹'+trade.livePremium+'</span>';
+          if (lo) h += '<span class="'+(lo.percentChange>=0?'text-green':'text-red')+' num">'+(lo.percentChange>=0?'+':'')+fmt(lo.percentChange)+'%</span><span class="text-xs text-muted num">O '+fmt(lo.open)+' · H '+fmt(lo.high)+' · L '+fmt(lo.low)+' · OI '+(lo.oi?Math.round(lo.oi/100000)+'L':'—')+'</span>';
+          h += '</div>';
+        } else {
+          h += '<div class="text-xs text-muted mb-1">Premium is Black-Scholes estimate (live LTP available for index options during market hours)</div>';
+        }
+
+        // Build the targets table into a variable
+        const premHdr = trade.premiumSource === 'live' ? 'Premium (live)' : 'Est. Premium';
+        let tbl = '<div class="overflow-auto"><table class="data-table"><thead><tr><th>Level</th><th>Spot Target</th><th>'+premHdr+'</th><th>Gain</th><th>Action</th></tr></thead><tbody>';
+        tbl += '<tr style="background:var(--accent-dim)"><td class="font-bold">ENTRY</td><td class="num">'+fmt(trade.entryTrigger,0)+'</td><td class="num font-bold">₹'+trade.entryPremium+'</td><td>—</td><td class="text-xs">'+(executable?'BUY only at verified live quote':actionable?'WAIT — live contract required':'Wait — do not enter yet')+'</td></tr>';
+        trade.targets.forEach(t => {
+          tbl += '<tr><td class="font-bold text-green">'+t.label+'</td><td class="num">'+fmt(t.spot,0)+'</td><td class="num font-bold text-green">₹'+t.premium+'</td><td class="text-green">+'+t.gainPct+'%</td><td class="text-xs">'+t.sellText+'</td></tr>';
+        });
+        tbl += '<tr><td class="font-bold text-red">STOP</td><td class="num">'+fmt(trade.stopLoss.spot,0)+'</td><td class="num font-bold text-red">₹'+trade.stopLoss.premium+'</td><td class="text-red">'+trade.stopLoss.lossPct+'%</td><td class="text-xs">'+trade.stopLoss.exitText+'</td></tr>';
+        tbl += '</tbody></table></div><p class="text-xs text-muted mt-1">Levels use live spot & Black-Scholes premium. Check your broker before trading.</p>';
+
+        if (actionable) {
+          h += '<div class="text-xs text-muted mb-1" style="text-transform:uppercase;letter-spacing:0.05em">'+(executable?'EXECUTABLE TRADE PLAN — LIVE ENTRY / T1 / T2 / T3 / STOP':'MODEL PLAN — NOT EXECUTABLE UNTIL LIVE CONTRACT IS VERIFIED')+'</div>';
+          h += tbl;
+        } else {
+          h += '<div class="flex justify-between text-sm" style="padding:0.4rem 0"><span class="text-muted">Watching level</span><span class="num font-bold text-amber">'+fmt(trade.entryTrigger,0)+'</span></div>';
+          h += '<details style="margin-top:0.25rem"><summary class="text-xs text-muted" style="cursor:pointer;user-select:none">Show simulated plan (optional — not active)</summary><div style="margin-top:0.5rem">'+tbl+'</div></details>';
+        }
+        h += '</div>';
+      }
+
+      // ── Confidence + honest empirical calibration ──
+      if (actionable) {
+        const cal = s._calibration || null;
+        h += '<div class="grid grid-2 mt-2">';
+        h += '<div class="card" style="text-align:center"><div class="card-title">MODEL CONFIDENCE SCORE</div>'+gauge(s.confidence, col)+'<div class="text-xs text-muted">Heuristic score, not a measured probability.</div></div>';
+        if (cal && cal.available) {
+          h += '<div class="card"><div class="card-title">EMPIRICAL CALIBRATION</div>'
+             + '<div style="font-size:1.7rem;font-weight:700;margin-top:0.7rem;color:'+(cal.empiricalWinRate>=55?'var(--primary)':'var(--accent)')+'">'+cal.empiricalWinRate+'%</div>'
+             + '<div class="text-sm">completed-paper-trade win rate · n='+cal.sampleSize+' · '+cal.scope+'</div>'
+             + '<div class="text-xs text-muted mt-1">Beta-shrunk calibrated score: '+cal.calibratedScore+'%. Target-specific probabilities are not claimed because T1/T2/T3 sample calibration is not yet measured.</div></div>';
+        } else {
+          h += '<div class="card"><div class="card-title">EMPIRICAL CALIBRATION</div>'
+             + '<div class="text-amber font-bold" style="margin-top:0.75rem">UNVALIDATED</div>'
+             + '<div class="text-sm mt-1">'+(cal?.label || 'No completed outcome sample yet.')+'</div>'
+             + '<div class="text-xs text-muted mt-1">T1/T2/T3 probability bars are hidden until at least 20 real live-premium paper trades have completed.</div></div>';
+        }
+        h += '</div>';
+      }
+
+      // ── Advanced Analytics cards (always shown) ──
+      const a = s.analytics;
+      if (a) {
+        h += '<div class="section-header mt-3"><h2 style="font-size:1rem">Advanced Analytics</h2></div>';
+        h += '<div class="grid grid-4" style="gap:0.75rem">';
+        h += acard('VOLATILITY', a.volSqueeze.detected ? 'SQUEEZE (big move expected)' : 'Normal', 'BB '+(a.volSqueeze.bbWidth||'—')+'%', a.volSqueeze.detected?'text-amber':'');
+        h += acard('MOMENTUM', a.momentum.value+'/100 — '+a.momentum.label, 'RSI-based', '');
+        h += acard('SIGNAL POWER', (s.netScore>=0?'Bullish':'Bearish')+' ('+s.netScore+')', 'Net 7-factor score', s.netScore>=0?'text-green':'text-red');
+        h += acard('RISK/LOT', '₹'+(a.risk.riskPerLot)+' risk', '₹'+a.risk.rewardT1PerLot+' reward (T1)', '');
+        h += acard('PIVOT', fmt(a.pivots.pp,2), 'Central pivot', 'text-blue');
+        h += acard('S1 / S2', fmt(a.pivots.s1,1)+' / '+fmt(a.pivots.s2,1), 'Support', 'text-green');
+        h += acard('R1 / R2', fmt(a.pivots.r1,1)+' / '+fmt(a.pivots.r2,1), 'Resistance', 'text-red');
+        h += acard('SUPERTREND', (s.superTrend||'—').toUpperCase(), '10, 3.0', s.superTrend==='bullish'?'text-green':'text-red');
+        h += '</div>';
+      }
+
+      // ── Strategy Engine (advanced) ──
+      if (s.strategy) {
+        const st = s.strategy;
+        const regClr = st.regime==='Trending'?'text-green':st.regime==='Choppy'?'text-red':'text-amber';
+        h += '<div class="section-header mt-3"><h2 style="font-size:1rem">Strategy Engine</h2></div>';
+        h += '<div class="grid grid-4" style="gap:0.75rem">';
+        h += acard('MARKET REGIME', st.regime, 'ADX '+(st.adx||'—'), regClr);
+        h += acard('TREND STRENGTH', 'ADX '+(st.adx||'—'), '+DI '+(st.plusDI||'—')+' / -DI '+(st.minusDI||'—'), st.adx>=25?'text-green':st.adx<16?'text-red':'text-amber');
+        h += acard('HIGHER TF (1H)', st.mtf, 'Multi-timeframe bias', st.mtf==='Bullish'?'text-green':st.mtf==='Bearish'?'text-red':'text-muted');
+        h += acard('OPENING RANGE', st.orb?st.orb.status:'—', st.orb?('H '+st.orb.high+' · L '+st.orb.low):'session ORB', st.orb&&st.orb.status.includes('UP')?'text-green':st.orb&&st.orb.status.includes('DOWN')?'text-red':'');
+        h += acard('SWING RESISTANCE', st.swing&&st.swing.resistance?fmt(st.swing.resistance,0):'—', 'nearest above', 'text-red');
+        h += acard('SWING SUPPORT', st.swing&&st.swing.support?fmt(st.swing.support,0):'—', 'nearest below', 'text-green');
+        // WIN-RATE — real history, or an honest blank.
+        // This card used to show `56/48/38 + (confidence-60)*0.4` and label it
+        // "EST. WIN-RATE ... heuristic for this regime". That is not an estimate of
+        // anything measured; it is confidence re-arithmetised and dressed up as a
+        // statistic, which is exactly the number a trader would size a position on.
+        // God Mode keeps real matched-pattern outcomes, so use those when there are
+        // enough of them and say "insufficient history" when there are not.
+        if (s._historicalMatches != null && s._historicalMatches >= 20 && s._historicalWR != null) {
+          h += acard('HISTORICAL WIN-RATE', s._historicalWR + '%',
+                     s._historicalMatches + ' similar setups in memory',
+                     s._historicalWR >= 55 ? 'text-green' : s._historicalWR < 40 ? 'text-red' : 'text-amber');
+        } else {
+          h += acard('HISTORICAL WIN-RATE', '—',
+                     'insufficient history (' + (s._historicalMatches || 0) + ' matches, need 20)',
+                     'text-muted');
+        }
+        h += acard('MTF + TREND', (st.mtf!=='n/a'&&((st.mtf==='Bullish'&&s.netScore>=0)||(st.mtf==='Bearish'&&s.netScore<0)))?'ALIGNED':'MIXED', 'confluence check', '');
+        h += '</div>';
+        h += '<div class="card mt-2"><div class="card-title">PLAYBOOK ('+st.regime+')</div><p class="text-sm mt-1" style="line-height:1.6">'+st.playbook+'</p></div>';
+      }
+
+      // ── Dealer Positioning (GEX) — the institutional edge ──
+      if (s.strategy && s.strategy.gex) {
+        const gx = s.strategy.gex;
+        const neg = gx.regime === 'Negative Gamma';
+        const regClr = neg ? 'text-red' : 'text-green';
+        h += '<div class="section-header mt-3"><h2 style="font-size:1rem">Dealer Positioning — Gamma Exposure (GEX)</h2><span class="section-badge">institutional edge</span></div>';
+        h += '<div class="card" style="border-color:'+(neg?'var(--danger)':'var(--primary)')+'">';
+        h += '<div class="grid grid-4" style="gap:0.75rem">';
+        h += acard('GAMMA REGIME', gx.regime, neg?'Amplifies moves (trend)':'Dampens moves (range)', regClr);
+        h += acard('NET GEX', fmt(gx.netGEX,0), 'dealer gamma (₹ notional)', regClr);
+        h += acard('ZERO-GAMMA FLIP', fmt(gx.flip,0), gx.aboveFlip?'spot ABOVE (bullish)':'spot BELOW (bearish)', gx.aboveFlip?'text-green':'text-red');
+        h += acard('SPOT', fmt(gx.spot,0), 'expiry '+(gx.expiry||'—')+' ('+gx.dte+'d)', '');
+        h += acard('CALL WALL', fmt(gx.callWall,0), 'upside magnet / resistance', 'text-red');
+        h += acard('PUT WALL', fmt(gx.putWall,0), 'downside support', 'text-green');
+        h += acard('MAX PAIN', fmt(gx.maxPain,0), 'expiry gravity', 'text-amber');
+        h += acard('PCR (OI)', gx.pcr, gx.pcr>1.2?'Bullish (put-heavy)':gx.pcr<0.7?'Bearish (call-heavy)':'Neutral', gx.pcr>1.2?'text-green':gx.pcr<0.7?'text-red':'');
+        h += '</div>';
+        if (s.strategy.gexNote) h += '<p class="text-sm mt-2" style="line-height:1.6;border-top:1px solid var(--border);padding-top:0.5rem">'+s.strategy.gexNote+'</p>';
+        h += '</div>';
+      }
+
+      // ── GOD MODE PANEL ──
+      if (s._godConfidence != null) {
+        const gmCol = s._godActionable ? 'rgba(139,92,246,0.12)' : 'rgba(107,114,128,0.08)';
+        const gmBorder = s._godActionable ? 'rgba(139,92,246,0.4)' : 'rgba(107,114,128,0.3)';
+        h += '<div class="card mt-3" style="background:'+gmCol+';border:1px solid '+gmBorder+';border-radius:10px">';
+        h += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem"><div class="card-title" style="color:#a78bfa;margin:0">🧠 GOD MODE</div>';
+        h += '<a href="god-dashboard.html" style="font-size:0.75rem;color:#60a5fa;text-decoration:none">Open Dashboard →</a></div>';
+        h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.5rem;font-size:0.8rem">';
+        h += '<div><span style="color:#9ca3af">'+(s._calibration?.available?'Calibrated Score':'Model Score · unvalidated')+'</span><div style="font-size:1.3rem;font-weight:700;color:'+(s._godConfidence>=60?'#34d399':'#fbbf24')+'">'+Math.round(s._godConfidence)+'%</div></div>';
+        h += '<div><span style="color:#9ca3af">Raw Engine Score</span><div style="font-size:1rem;color:#6b7280">'+Math.round(s._rawConfidence || s.confidence)+'%</div></div>';
+        if (s._historicalMatches > 0) h += '<div><span style="color:#9ca3af">History</span><div style="color:#e2e8f0">'+s._historicalWR+'% WR ('+s._historicalMatches+')</div></div>';
+        if (s._ivRegime) h += '<div><span style="color:#9ca3af">IV Regime</span><div style="color:#e2e8f0">'+s._ivRegime.regime+'</div></div>';
+        if (s._positionSize) h += '<div><span style="color:#9ca3af">Position</span><div style="color:#e2e8f0">'+s._positionSize.lots+' lots ('+s._positionSize.capitalPct+'%)</div></div>';
+        if (s._optimalStrike) h += '<div><span style="color:#9ca3af">Optimal Strike</span><div style="color:#a78bfa;font-weight:600">'+s._optimalStrike.strike+' '+s._optimalStrike.optType+'</div></div>';
+        if (s._premiumCeiling) h += '<div><span style="color:#9ca3af">Max Premium</span><div style="color:#fbbf24;font-weight:600">₹'+s._premiumCeiling.maxPremium+'</div></div>';
+        h += '</div>';
+        // Verdict
+        h += '<div style="margin-top:0.6rem;padding:0.5rem 0.7rem;background:rgba(0,0,0,0.2);border-radius:6px;font-size:0.8rem;color:#d1d5db">'+(s._godVerdict || '')+'</div>';
+        // Evidence summary
+        if (s._godEvidence && s._godEvidence.primary && s._godEvidence.primary.length) {
+          h += '<div style="margin-top:0.5rem;font-size:0.75rem">';
+          h += '<span style="color:#34d399">FOR:</span> ';
+          h += s._godEvidence.primary.slice(0,3).map(e => '<span style="color:#9ca3af">'+e.factor+'</span>').join(', ');
+          if (s._godEvidence.counter && s._godEvidence.counter.length) {
+            h += ' <span style="color:#f87171;margin-left:0.5rem">AGAINST:</span> ';
+            h += s._godEvidence.counter.slice(0,2).map(e => '<span style="color:#9ca3af">'+e.factor+'</span>').join(', ');
+          }
+          h += '</div>';
+        }
+        // Alert state
+        if (s._godAlert && s._godAlert.stage > 0) {
+          const alertColors = {1:'#fbbf24',2:'#60a5fa',3:'#34d399'};
+          h += '<div style="margin-top:0.4rem;padding:0.3rem 0.6rem;border-radius:4px;font-size:0.75rem;font-weight:700;background:rgba(0,0,0,0.3);color:'+(alertColors[s._godAlert.stage]||'#9ca3af')+'">'+s._godAlert.message+'</div>';
+        }
+        // Regime shift warning
+        if (s._regimeShift) {
+          h += '<div style="margin-top:0.3rem;font-size:0.75rem;color:#fbbf24">⚡ REGIME SHIFT DETECTED: '+s._regimeShift.type+' ('+s._regimeShift.count+' dimensions shifting)</div>';
+        }
+        // Hedge suggestion
+        if (s._hedge && s.direction !== 'NO_TRADE') {
+          h += '<div style="margin-top:0.3rem;font-size:0.75rem;color:#60a5fa">🛡️ Hedge: '+s._hedge.description+'</div>';
+        }
+        h += '</div>';
+      }
+
+      // ── Expert Advice ──
+      h += '<div class="card mt-3" style="background:linear-gradient(135deg,rgba(59,130,246,0.08),rgba(16,185,129,0.05));border-color:var(--accent)"><div class="card-title">EXPERT ADVICE</div><p class="text-sm mt-1" style="line-height:1.7">'+expertAdvice(s)+'</p></div>';
+
+      // ── AI Analysis (always available) ──
+      h += '<div class="card mt-2"><div class="card-title">AI ANALYSIS</div><div id="ai-out" class="ai-narrative mt-1"><span class="text-muted text-sm">Click the "AI Analysis" button above for an institutional read.</span></div></div>';
+
+      // ── Component breakdown ──
+      if (s.components) h += '<div class="card mt-2"><div class="card-title">COMPONENT BREAKDOWN (7-FACTOR)</div>'+componentBars(s.components)+'</div>';
+
+      out.innerHTML = h;
+
+      // Restore cached AI narrative for this signal (survives 30s auto-refresh)
+      const aiKey = s.symbol + '_' + s.direction;
+      if (_aiCache[aiKey]) {
+        const el = document.getElementById('ai-out');
+        if (el) el.innerHTML = _aiCache[aiKey];
+      }
+    } // end render()
+    const _aiCache = {};
+
+    function acard(title, main, sub, cls) {
+      return '<div class="card" style="padding:0.75rem"><div class="card-title" style="font-size:0.65rem">'+title+'</div><div class="font-bold '+cls+'" style="font-size:0.95rem;margin-top:0.25rem">'+main+'</div><div class="text-xs text-muted">'+sub+'</div></div>';
+    }
+
+    function row(l, v) { return '<div class="flex justify-between mb-1"><span class="text-xs text-muted">'+l+'</span><span class="num text-sm">'+v+'</span></div>'; }
+    function componentBars(c) {
+      let h = '<div style="margin-top:0.75rem">';
+      for (const k in c) {
+        const contrib = (c[k].bias * c[k].weight).toFixed(1);
+        const w = Math.abs(c[k].bias) * 100;
+        const col = c[k].bias >= 0 ? 'green' : 'red';
+        h += '<div class="flex items-center gap-1 mb-1"><span class="text-xs" style="width:90px;text-transform:capitalize">'+k+'</span><div class="progress-bar" style="flex:1"><div class="fill '+col+'" style="width:'+w+'%"></div></div><span class="num text-xs" style="width:45px;text-align:right">'+contrib+'</span></div>';
+      }
+      return h + '</div>';
+    }
+
+    async function runAI() {
+      const s = currentSignal;
+      if (!s) { alert('Please wait for a signal to load first.'); return; }
+      // Ensure there's a place to show the analysis (create one if NO-TRADE has none)
+      let el = document.getElementById('ai-out');
+      if (!el) {
+        const out = document.getElementById('out');
+        const div = document.createElement('div');
+        div.className = 'card mt-2';
+        div.innerHTML = '<div class="card-title">AI ANALYSIS</div><div id="ai-out" class="ai-narrative mt-1"></div>';
+        out.appendChild(div);
+        el = document.getElementById('ai-out');
+      }
+      // Auto-scroll to AI section
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.innerHTML = '<div class="loading-overlay" style="padding:1rem"><div class="spinner"></div><span>Generating AI analysis...</span></div>';
+
+      const st = s.strategy || {};
+      const gx = st.gex || {};
+      const trade = s.optionTrade || s.watchTrade || {};
+      const prompt = 'Analyze this Indian F&O setup for ' + s.symbol + '.\n' +
+        'Signal: ' + s.direction + ' | Confidence: ' + s.confidence + '% | Trend: ' + (s.trendLabel||'') + '\n' +
+        'Spot: ' + s.ltp + ' | RSI: ' + s.rsi + ' | ATR: ' + s.atr + '\n' +
+        'Regime: ' + (st.regime||'') + ' (ADX ' + (st.adx||'?') + ') | Higher-TF(1H): ' + (st.mtf||'') + '\n' +
+        (gx.regime ? ('Dealer GEX: ' + gx.regime + ' | zero-gamma flip ' + gx.flip + ' | call wall ' + gx.callWall + ' | put wall ' + gx.putWall + ' | PCR ' + gx.pcr + '\n') : '') +
+        'Option: ' + (trade.strike||'') + ' ' + (trade.type||'') + ' @ ₹' + (trade.entryPremium||'') + '\n' +
+        'Give your 4-part institutional read (thesis, 2-3 drivers with numbers, invalidation level, risk reminder). Under 200 words.';
+
+      try {
+        const res = await postJSON(PROXY + '?action=ai', { prompt });
+        const data = await res.json();
+        if (data.status && data.narrative) {
+          const html = data.narrative.replace(/\n/g, '<br>') + '<p class="text-xs text-muted mt-1" style="opacity:0.6">Model: ' + (data.model||'AI') + '</p>';
+          el.innerHTML = html;
+          _aiCache[s.symbol + '_' + s.direction] = html; // survive auto-refresh
+        } else {
+          el.innerHTML = '<span class="text-muted">AI unavailable: ' + (data.error || 'unknown') + '</span>';
+        }
+      } catch (e) {
+        el.innerHTML = '<span class="text-muted">AI request failed: ' + e.message + '</span>';
+      }
+    };
+
+    function isMarketNow() {
+      const i = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+      const d = i.getDay(), t = i.getHours() * 60 + i.getMinutes();
+      return d >= 1 && d <= 5 && t >= 555 && t <= 930;
+    }
+    let _refreshBusy = false;
+    async function refreshNow(silent) {
+      if (_refreshBusy) return;
+      _refreshBusy = true;
+      try {
+        if (document.getElementById('autopick').checked) await pickBest(silent);
+        else await run(silent);
+      } finally { _refreshBusy = false; }
+    }
+    // When user manually changes instrument, turn off auto-pick
+    sel.addEventListener('change', () => { document.getElementById('autopick').checked = false; });
+
+    // Initial load (show spinner once)
+    refreshNow(false);
+
+    // Auto-refresh — interval controlled by God Mode (rapid scan when setup building)
+    let _currentInterval = 30000;
+    let _refreshTimer = setInterval(() => refreshNow(true), _currentInterval);
+  </script>
+</body>
+</html>

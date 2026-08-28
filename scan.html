@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FNO Signal Pro — Scanner</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">F</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html" class="active" style="color:var(--primary);background:var(--primary-dim)">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Tools</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <section class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.75rem">
+      <div class="flex items-center gap-2">
+        <div><label>Universe</label>
+          <select id="uni"><option value="indices">Indices Only</option><option value="all" selected>Indices + Stocks</option><option value="stocks">Stocks Only</option></select>
+        </div>
+        <div><label>Min Confidence: <span id="cval">55</span>%</label>
+          <input type="range" id="cf" min="50" max="90" value="55" style="width:140px;margin-top:0.5rem">
+        </div>
+        <button class="btn btn-primary" style="margin-top:1.2rem" onclick="scan()">🔍 Scan Now</button>
+      </div>
+      <div id="status" class="text-xs text-muted" style="margin-top:1.2rem"></div>
+    </section>
+
+    <section class="mt-2" id="out"><div class="loading-overlay"><div class="spinner"></div><span>Ready to scan...</span></div></section>
+
+    <div class="disclaimer"><strong>DISCLAIMER:</strong> Informational only. Not financial advice. Verify independently before trading.</div>
+  </main>
+
+  <script type="module">
+    import { buildSnapshot, generateSignal, fmt, inr } from './js/live-engine.js';
+    let last = null, minC = 55;
+
+    (function ms(){ var i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'})); var d=i.getDay(),t=i.getHours()*60+i.getMinutes(); var e=document.getElementById('mkt-t'),b=document.getElementById('mkt'); if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';} else if(t>=555&&t<=930){e.textContent='MARKET OPEN';b.className='market-status-badge open';} else {e.textContent='CLOSED';b.className='market-status-badge closed';} setTimeout(ms,30000); })();
+
+    document.getElementById('cf').addEventListener('input', e => { minC = +e.target.value; document.getElementById('cval').textContent = minC; if (last) render(last); });
+
+    const IDX = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'];
+    const STK = ['RELIANCE','HDFCBANK','ICICIBANK','INFY','TCS','SBIN','BHARTIARTL','ITC','KOTAKBANK','LT','AXISBANK','TATAMOTORS','MARUTI','WIPRO','HCLTECH','ADANIENT','BAJFINANCE','TITAN'];
+
+    window.scan = async function() {
+      const u = document.getElementById('uni').value;
+      const universe = u === 'indices' ? IDX : u === 'stocks' ? STK : IDX.concat(STK);
+      const out = document.getElementById('out'), st = document.getElementById('status');
+      out.innerHTML = '<div class="loading-overlay"><div class="spinner"></div><span>Scanning '+universe.length+' instruments (live data)...</span></div>';
+      st.textContent = 'Scanning...';
+      const t0 = Date.now();
+      const results = [];
+      // Sequential with delay to respect Angel One historical rate limit (~3 req/sec)
+      for (let i = 0; i < universe.length; i++) {
+        const sym = universe[i];
+        try {
+          const snap = await buildSnapshot(sym);
+          if (snap) results.push(generateSignal(snap, { confidenceThreshold: 55 }));
+        } catch (e) {}
+        st.textContent = 'Scanned ' + (i+1) + '/' + universe.length + ' (' + results.length + ' with data)...';
+        await new Promise(f => setTimeout(f, 380)); // ~2.6 req/sec, under rate limit
+      }
+      last = { results, scanned: universe.length, dur: Date.now() - t0 };
+      st.innerHTML = 'Scanned <strong>'+universe.length+'</strong> in <strong>'+(last.dur/1000).toFixed(1)+'s</strong> · '+new Date().toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'})+' IST';
+      render(last);
+    };
+
+    function render(data) {
+      const buy = data.results.filter(r => r.direction === 'BUY' && r.confidence >= minC).sort((a,b)=>b.confidence-a.confidence);
+      const sell = data.results.filter(r => r.direction === 'SELL' && r.confidence >= minC).sort((a,b)=>b.confidence-a.confidence);
+      const out = document.getElementById('out');
+      let h = '';
+      if (buy.length) h += section('BUY Signals', 'buy', buy);
+      if (sell.length) h += section('SELL Signals', 'sell', sell);
+      if (!buy.length && !sell.length) h = '<div class="loading-overlay"><span class="text-muted">No signals above '+minC+'% confidence. Lower the filter or scan during market hours. ('+data.results.length+' instruments returned data)</span></div>';
+      out.innerHTML = h;
+    }
+
+    function section(title, cls, arr) {
+      let h = '<div class="scan-section"><div class="scan-section-title '+cls+'">'+title+' ('+arr.length+')</div><div class="overflow-auto"><table class="data-table"><thead><tr><th>Symbol</th><th>Signal</th><th>Confidence</th><th>Score</th><th>LTP</th><th>Entry</th><th>Stop</th><th>T1</th><th>Strategy</th></tr></thead><tbody>';
+      arr.forEach(s => {
+        const cc = s.confidence >= 80 ? 'high' : s.confidence >= 70 ? 'medium' : 'low';
+        h += '<tr><td class="font-bold">'+s.symbol+'</td><td><span class="signal-badge '+cls+'">'+s.direction+'</span></td><td><span class="confidence-badge '+cc+'">'+s.confidence.toFixed(0)+'%</span></td><td class="num">'+s.netScore+'</td><td class="num">'+fmt(s.ltp)+'</td><td class="num">'+fmt(s.entryZone.ideal,0)+'</td><td class="num text-red">'+fmt(s.stopLoss,0)+'</td><td class="num text-green">'+fmt(s.targets[0].price,0)+'</td><td class="text-xs">'+s.optionStrategy.action+'</td></tr>';
+      });
+      return h + '</tbody></table></div></div>';
+    }
+
+    scan();
+  </script>
+</body>
+</html>

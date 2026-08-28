@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FNO Signal Pro — Option Chain</title>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">F</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html" class="active" style="color:var(--primary);background:var(--primary-dim)">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Tools</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <section class="flex items-center gap-2" style="flex-wrap:wrap">
+      <div><label>Index</label>
+        <select id="sym"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option><option>MIDCPNIFTY</option></select>
+      </div>
+      <button class="btn btn-primary" style="margin-top:1.2rem" onclick="load()">Load Chain</button>
+    </section>
+
+    <section id="summary" class="grid grid-3 mt-2"></section>
+
+    <section class="mt-2">
+      <div class="card"><div class="card-title">OPTION CHAIN — GREEKS & IV (Live via Angel One)</div>
+        <div id="chain" class="mt-1"><div class="loading-overlay"><div class="spinner"></div><span>Loading option chain...</span></div></div>
+      </div>
+    </section>
+
+    <div class="disclaimer"><strong>DISCLAIMER:</strong> Greeks & IV are live from Angel One SmartAPI. Open Interest not available via this API. Not financial advice.</div>
+  </main>
+
+  <script type="module">
+    import { fmt } from './js/live-engine.js';
+    const PROXY = '/signals/api/proxy.php';
+    const sel = document.getElementById('sym');
+    sel.addEventListener('change', () => load());
+    window.load = load;
+
+    (function ms(){ var i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'})); var d=i.getDay(),t=i.getHours()*60+i.getMinutes(); var e=document.getElementById('mkt-t'),b=document.getElementById('mkt'); if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';} else if(t>=555&&t<=930){e.textContent='MARKET OPEN';b.className='market-status-badge open';} else {e.textContent='CLOSED';b.className='market-status-badge closed';} setTimeout(ms,30000); })();
+
+    async function load() {
+      const sym = sel.value;
+      const chain = document.getElementById('chain'), sum = document.getElementById('summary');
+      chain.innerHTML = '<div class="loading-overlay"><div class="spinner"></div><span>Loading '+sym+' option chain...</span></div>';
+      sum.innerHTML = '';
+      try {
+        const res = await fetch(PROXY + '?action=option_chain&symbol=' + sym);
+        const j = await res.json();
+        if (!j.status || !j.data) throw new Error(j.error || 'No data');
+        const d = j.data;
+        const spot = d.spot;
+
+        // Summary cards
+        sum.innerHTML =
+          scard('SPOT PRICE', '₹'+fmt(spot), d.expiry ? 'Expiry: '+d.expiry : '') +
+          scard('AVG IV', (d.avgCallIV||'—')+'% / '+(d.avgPutIV||'—')+'%', 'Call IV / Put IV') +
+          scard('IV SKEW', (d.ivSkew!=null?(d.ivSkew>0?'+':'')+d.ivSkew+'%':'—'), d.ivSkew>0?'Put skew (bearish hedging)':'Call skew (bullish)');
+
+        // ATM strike
+        const step = sym==='BANKNIFTY'?100:sym==='MIDCPNIFTY'?25:50;
+        const atm = Math.round(spot/step)*step;
+        // Filter around ATM (±15 strikes)
+        const near = d.strikes.filter(s => Math.abs(s.strike - atm) <= step*15);
+
+        let h = '<div class="oc-table-wrapper"><table class="oc-table"><thead><tr>'+
+          '<th class="ce-section">CE Δ</th><th class="ce-section">CE γ</th><th class="ce-section">CE θ</th><th class="ce-section">CE Vega</th><th class="ce-section">CE IV</th>'+
+          '<th class="strike-col">STRIKE</th>'+
+          '<th class="pe-section">PE IV</th><th class="pe-section">PE Vega</th><th class="pe-section">PE θ</th><th class="pe-section">PE γ</th><th class="pe-section">PE Δ</th>'+
+          '</tr></thead><tbody>';
+        near.forEach(s => {
+          const isATM = Math.abs(s.strike - atm) < step*0.5;
+          h += '<tr class="'+(isATM?'atm-row':'')+'">'+
+            ce(s.CE) + '<td class="strike-col">'+s.strike+(isATM?' ⬤':'')+'</td>' + pe(s.PE) + '</tr>';
+        });
+        h += '</tbody></table></div><p class="text-xs text-muted mt-1">⬤ = ATM ('+atm+') · Δ Delta · γ Gamma · θ Theta · Live greeks from Angel One</p>';
+        chain.innerHTML = h;
+      } catch (e) {
+        chain.innerHTML = '<div style="padding:2rem;text-align:center"><p class="text-muted">Option chain unavailable: '+e.message+'</p><p class="text-xs text-muted mt-1">Try during market hours or select a different index.</p></div>';
+      }
+    };
+    function ce(c){ if(!c) return '<td class="ce-section">—</td>'.repeat(5); return '<td class="ce-section">'+c.delta+'</td><td class="ce-section">'+c.gamma+'</td><td class="ce-section">'+c.theta+'</td><td class="ce-section">'+c.vega+'</td><td class="ce-section" style="font-weight:600">'+c.iv+'</td>'; }
+    function pe(p){ if(!p) return '<td class="pe-section">—</td>'.repeat(5); return '<td class="pe-section" style="font-weight:600">'+p.iv+'</td><td class="pe-section">'+p.vega+'</td><td class="pe-section">'+p.theta+'</td><td class="pe-section">'+p.gamma+'</td><td class="pe-section">'+p.delta+'</td>'; }
+    function scard(t,v,s){ return '<div class="card" style="text-align:center"><div class="card-title">'+t+'</div><div class="num font-bold" style="font-size:1.5rem;margin-top:0.5rem">'+v+'</div><div class="text-xs text-muted mt-1">'+s+'</div></div>'; }
+
+    load();
+  </script>
+</body>
+</html>

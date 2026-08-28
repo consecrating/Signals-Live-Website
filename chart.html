@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FNO Signal Pro — Charts</title>
+  <link rel="stylesheet" href="css/main.css">
+  <style>
+    /* Native chart — no third-party embed, no external scripts. */
+    .chart-shell { position:relative; background:#0a0e17; border:1px solid var(--border,#1f2937); border-radius:10px; overflow:hidden; }
+    #cv { display:block; width:100%; height:460px; cursor:crosshair; }
+    @media (max-width:768px){ #cv { height:340px; } }
+    .ohlc-bar { display:flex; gap:0.85rem; flex-wrap:wrap; align-items:center;
+      padding:0.5rem 0.75rem; border-bottom:1px solid var(--border,#1f2937);
+      font-size:0.74rem; font-variant-numeric:tabular-nums; background:rgba(17,24,39,0.5); }
+    .ohlc-bar b { font-weight:700; }
+    .ov-toggles { display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.6rem; }
+    .ov { font-size:0.68rem; padding:0.28rem 0.6rem; border-radius:999px; cursor:pointer;
+      border:1px solid var(--border,#1f2937); background:transparent; color:#9ca3af; user-select:none; }
+    .ov.on { color:#fff; }
+    .ov .sw { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+    .chart-note { font-size:0.68rem; color:#6b7280; margin-top:0.4rem; }
+    .gex-chip { font-size:0.66rem; color:#9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">F</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html" class="active" style="color:var(--primary);background:var(--primary-dim)">Charts</a></li>
+      <li><a href="tool.html">Tools</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container">
+    <section class="flex items-center gap-2" style="flex-wrap:wrap">
+      <div><label>Symbol</label><select id="sym"></select></div>
+      <div class="tabs" style="margin-top:1rem;border:none">
+        <button class="tab tf active" data-i="FIVE_MINUTE" data-d="2">5m</button>
+        <button class="tab tf" data-i="FIFTEEN_MINUTE" data-d="6">15m</button>
+        <button class="tab tf" data-i="ONE_HOUR" data-d="30">1H</button>
+        <button class="tab tf" data-i="ONE_DAY" data-d="240">1D</button>
+      </div>
+    </section>
+
+    <div class="ov-toggles">
+      <span class="ov on" data-k="ema9"><span class="sw" style="background:#60a5fa"></span>EMA 9</span>
+      <span class="ov on" data-k="ema21"><span class="sw" style="background:#f59e0b"></span>EMA 21</span>
+      <span class="ov on" data-k="vwap"><span class="sw" style="background:#a78bfa"></span><span id="vwap-lbl">VWAP</span></span>
+      <span class="ov" data-k="bb"><span class="sw" style="background:#6b7280"></span>Bollinger</span>
+      <span class="ov on" data-k="st"><span class="sw" style="background:#34d399"></span>SuperTrend</span>
+      <span class="ov on" data-k="gex"><span class="sw" style="background:#ef4444"></span>Dealer Levels (GEX)</span>
+    </div>
+
+    <section class="chart-shell mt-2">
+      <div class="ohlc-bar" id="ohlc"><span class="text-muted">Loading live candles from Angel One…</span></div>
+      <canvas id="cv"></canvas>
+    </section>
+    <div class="chart-note" id="cnote"></div>
+
+    <section class="mt-3">
+      <div class="section-header"><h2>Technical Indicators (Live)</h2></div>
+      <div id="ind"><div class="loading-overlay"><div class="spinner"></div><span>Computing indicators...</span></div></div>
+    </section>
+
+    <div class="disclaimer"><strong>DISCLAIMER:</strong> Chart and indicators are rendered from your own Angel One SmartAPI feed. Not financial advice.</div>
+  </main>
+
+  <script type="module">
+    import { INSTRUMENTS, getCandles, RSI, MACD, ATR, bollinger, superTrend, VWAP, SMA, EMA, emaSeries, fmt } from './js/live-engine.js?v=3.7';
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Native candlestick chart drawn from Angel One candles.
+    //
+    // This page used to embed TradingView's free advanced-chart widget. That widget
+    // is not licensed to serve NSE index data to third-party sites, so it answered
+    // "This symbol is only available on TradingView" and rendered an empty pane for
+    // NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY. It also never touched the Angel One feed,
+    // so no amount of live data on our side could have fixed it.
+    //
+    // Everything below is computed from ?action=candles — the same feed the signal
+    // engine trades on, so the chart and the signals can never disagree.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    let sym = 'NIFTY', iv = 'FIVE_MINUTE', days = 2;
+
+    // ── OPTION-CONTRACT MODE ──────────────────────────────────────────────────
+    // Opened from signal.html's "Live Graph" button with ?opt=1&symbol&strike&type
+    // &expiry. Plots the actual option premium (the thing the user trades), not the
+    // index. Declared at the top: the symbol-selector block below references OPT, and
+    // `const` is not hoisted — placing it lower caused "Cannot access 'OPT' before
+    // initialization" and a blank chart.
+    const _q = new URLSearchParams(location.search);
+    const OPT = _q.get('opt') === '1' ? {
+      symbol: (_q.get('symbol') || 'NIFTY').toUpperCase(),
+      strike: _q.get('strike'), type: (_q.get('type') || 'CE').toUpperCase(),
+      expiry: _q.get('expiry') || '',
+    } : null;
+    // Dealer/GEX levels are an INDEX concept (spot vs option open interest). They
+    // are meaningless on an option-premium chart, so hide that toggle in option mode.
+    if (OPT) {
+      addEventListener('DOMContentLoaded', () => {
+        const g = document.querySelector('.ov[data-k="gex"]'); if (g) g.style.display = 'none';
+      });
+    }
+    let C = null;          // candle payload
+    let SER = null;        // computed overlay series
+    let GEX = null;        // dealer levels
+    let hoverIdx = -1;
+    const ON = { ema9:true, ema21:true, vwap:true, bb:false, st:true, gex:true };
+
+    const cv = document.getElementById('cv');
+    const ctx = cv.getContext('2d');
+
+    (function ms(){ var i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'})); var d=i.getDay(),t=i.getHours()*60+i.getMinutes(); var e=document.getElementById('mkt-t'),b=document.getElementById('mkt'); if(d===0||d===6){e.textContent='CLOSED';b.className='market-status-badge closed';} else if(t>=555&&t<=930){e.textContent='MARKET OPEN';b.className='market-status-badge open';} else {e.textContent='CLOSED';b.className='market-status-badge closed';} setTimeout(ms,30000); })();
+
+    const sel = document.getElementById('sym');
+    if (OPT) {
+      // In option mode the symbol selector is meaningless — replace it with the
+      // contract label so it is unmistakable which premium is being charted.
+      const wrap = sel.closest('div');
+      if (wrap) wrap.innerHTML = '<label>Contract</label><div style="font-weight:700;font-size:0.95rem;color:var(--primary)">'
+        + OPT.symbol + ' ' + OPT.strike + ' ' + OPT.type + (OPT.expiry ? ' · ' + OPT.expiry : '')
+        + ' <span class="text-xs text-muted" style="font-weight:400">(option premium)</span></div>';
+      document.title = OPT.symbol + ' ' + OPT.strike + ' ' + OPT.type + ' — Live Graph';
+    } else {
+      INSTRUMENTS.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o); });
+      sel.value = sym;
+      sel.addEventListener('change', () => { sym = sel.value; reload(); });
+    }
+
+    document.querySelectorAll('.tf').forEach(t => t.addEventListener('click', e => {
+      document.querySelectorAll('.tf').forEach(x => x.classList.remove('active'));
+      const btn = e.target.closest('.tf'); btn.classList.add('active');
+      iv = btn.dataset.i; days = +btn.dataset.d;
+      reload();
+    }));
+
+    document.querySelectorAll('.ov').forEach(el => el.addEventListener('click', () => {
+      const k = el.dataset.k; ON[k] = !ON[k];
+      el.classList.toggle('on', ON[k]);
+      draw();
+    }));
+
+    // ── Series helpers ───────────────────────────────────────────────────────
+    /**
+     * True VWAP needs traded volume. NSE does not publish volume for its indices
+     * (the feed returns 0), so for those this is a time-weighted average price.
+     * Labelled honestly in the UI rather than presenting TWAP as VWAP.
+     */
+    function vwapSeries(h, l, c, v) {
+      const hasVol = v && v.some(x => x > 0);
+      const out = new Array(c.length).fill(null);
+      let pv = 0, vv = 0;
+      for (let i = 0; i < c.length; i++) {
+        const tp = (h[i] + l[i] + c[i]) / 3;
+        const vol = hasVol ? (v[i] || 0) : 1;
+        pv += tp * vol; vv += vol;
+        out[i] = vv > 0 ? pv / vv : null;
+      }
+      return { series: out, isTrue: hasVol };
+    }
+
+    function bbSeries(c, p = 20, sd = 2) {
+      const u = [], m = [], lo = [];
+      for (let i = 0; i < c.length; i++) {
+        if (i < p - 1) { u.push(null); m.push(null); lo.push(null); continue; }
+        const w = c.slice(i - p + 1, i + 1);
+        const mean = w.reduce((a, b) => a + b, 0) / p;
+        const std = Math.sqrt(w.reduce((s, x) => s + (x - mean) ** 2, 0) / p);
+        u.push(mean + sd * std); m.push(mean); lo.push(mean - sd * std);
+      }
+      return { upper: u, mid: m, lower: lo };
+    }
+
+    /** SuperTrend as a plottable series, mirroring live-engine's superTrend(). */
+    function stSeries(h, l, c, p = 10, mult = 3) {
+      const n = c.length, out = new Array(n).fill(null), dirs = new Array(n).fill(0);
+      if (n < p + 1) return { line: out, dir: dirs };
+      const tr = [];
+      for (let i = 1; i < n; i++) tr.push(Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])));
+      const atr = new Array(tr.length).fill(0);
+      let a = tr.slice(0, p).reduce((s, x) => s + x, 0) / p; atr[p-1] = a;
+      for (let i = p; i < tr.length; i++) { a = (a*(p-1) + tr[i]) / p; atr[i] = a; }
+      let dir = 1, pu = 0, pl = 0;
+      for (let i = p; i < n; i++) {
+        const av = atr[i-1], hl = (h[i] + l[i]) / 2;
+        const bu = hl + mult*av, bl = hl - mult*av;
+        const u  = (bu < pu || c[i-1] > pu) ? bu : pu;
+        const lw = (bl > pl || c[i-1] < pl) ? bl : pl;
+        if (dir === 1 && c[i] < lw) dir = -1;
+        else if (dir === -1 && c[i] > u) dir = 1;
+        pu = u; pl = lw;
+        out[i] = dir === 1 ? lw : u;
+        dirs[i] = dir;
+      }
+      return { line: out, dir: dirs };
+    }
+
+    // ── Data ─────────────────────────────────────────────────────────────────
+    async function fetchGex(symbol) {
+      if (!['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY'].includes(symbol)) return null;
+      try {
+        const r = await fetch('/signals/api/proxy.php?action=gex&symbol=' + symbol, { cache: 'no-store' });
+        const j = await r.json();
+        if (!j.status || !j.data) return null;
+        // Only plot dealer levels we actually trust. proxy.php reports chain
+        // coverage; a partial chain biases every OI-weighted level.
+        if (j.data.reliable === false) return { unreliable: true, coverage: j.data.coverage };
+        return j.data;
+      } catch (e) { return null; }
+    }
+
+    async function fetchOptionCandles() {
+      const u = '/signals/api/proxy.php?action=option_candles&symbol=' + encodeURIComponent(OPT.symbol)
+              + '&strike=' + encodeURIComponent(OPT.strike) + '&type=' + encodeURIComponent(OPT.type)
+              + (OPT.expiry ? '&expiry=' + encodeURIComponent(OPT.expiry) : '')
+              + '&interval=' + iv + '&cb=' + Date.now();
+      try {
+        const j = await (await fetch(u, { cache: 'no-store' })).json();
+        if (!j.status || !j.data || !j.data.count) return null;
+        return j.data; // {timestamps,opens,highs,lows,closes,volumes,count,contract}
+      } catch (e) { return null; }
+    }
+
+    async function reload() {
+      document.getElementById('ohlc').innerHTML = '<span class="text-muted">Loading live candles from Angel One…</span>';
+
+      if (OPT) {
+        // Option contract: real premium candles, no GEX overlay (GEX is an index concept).
+        const oc = await fetchOptionCandles();
+        C = oc; GEX = null;
+        if (!C || !C.count) {
+          SER = null; draw();
+          document.getElementById('ohlc').innerHTML = '<span class="text-muted">No candle data for ' + OPT.symbol + ' ' + OPT.strike + ' ' + OPT.type + '.</span>';
+        } else {
+          const { highs:h, lows:l, closes:cl, volumes:v } = C;
+          const vw = vwapSeries(h, l, cl, v);
+          SER = { ema9: emaSeries(cl,9), ema21: emaSeries(cl,21), vwap: vw.series, vwapTrue: vw.isTrue,
+                  bb: bbSeries(cl), st: stSeries(h,l,cl), hasVol: v && v.some(x=>x>0) };
+          document.getElementById('vwap-lbl').textContent = vw.isTrue ? 'VWAP' : 'TWAP';
+          draw();
+        }
+        loadInd();
+        renderNote();
+        return;
+      }
+
+      const [c, g] = await Promise.all([getCandles(sym, iv, days), fetchGex(sym)]);
+      C = c; GEX = g;
+      if (!C || !C.count) {
+        SER = null; draw();
+        document.getElementById('ohlc').innerHTML = '<span class="text-muted">No candle data for ' + sym + ' at this timeframe.</span>';
+      } else {
+        const { highs:h, lows:l, closes:cl, volumes:v } = C;
+        const vw = vwapSeries(h, l, cl, v);
+        SER = {
+          ema9: emaSeries(cl, 9), ema21: emaSeries(cl, 21),
+          vwap: vw.series, vwapTrue: vw.isTrue,
+          bb: bbSeries(cl), st: stSeries(h, l, cl),
+          hasVol: v && v.some(x => x > 0),
+        };
+        document.getElementById('vwap-lbl').textContent = vw.isTrue ? 'VWAP' : 'TWAP';
+        draw();
+      }
+      loadInd();
+      renderNote();
+    }
+
+    function renderNote() {
+      const n = document.getElementById('cnote');
+      let s = C && C.count ? C.count + ' candles · ' + iv.replace('_',' ').toLowerCase()
+              + (OPT ? ' · option premium (' + (C.contract || (OPT.symbol+' '+OPT.strike+' '+OPT.type)) + ')' : '')
+              + ' · Angel One SmartAPI' : '';
+      if (SER && !SER.vwapTrue) s += ' · NSE publishes no index volume, so the purple line is TWAP (time-weighted), not VWAP';
+      if (GEX && GEX.unreliable) s += ' · Dealer levels hidden: option-chain coverage only ' + GEX.coverage + '%';
+      n.textContent = s;
+    }
+
+    // ── Drawing ──────────────────────────────────────────────────────────────
+    function fitCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const r = cv.getBoundingClientRect();
+      cv.width = Math.max(320, Math.floor(r.width * dpr));
+      cv.height = Math.max(220, Math.floor(r.height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w: r.width, h: r.height };
+    }
+
+    const PAD = { l: 6, r: 64, t: 10, b: 24 };
+
+    function draw() {
+      const { w, h } = fitCanvas();
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#0a0e17'; ctx.fillRect(0, 0, w, h);
+      if (!C || !C.count || !SER) {
+        ctx.fillStyle = '#6b7280'; ctx.font = '13px system-ui,sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('No data to plot', w/2, h/2);
+        return;
+      }
+
+      const { opens:o, highs:hi, lows:lo, closes:c, volumes:v, timestamps:ts } = C;
+      const n = c.length;
+      const volH = SER.hasVol ? Math.round((h - PAD.t - PAD.b) * 0.20) : 0;
+      const px0 = PAD.l, px1 = w - PAD.r;
+      const py0 = PAD.t, py1 = h - PAD.b - (volH ? volH + 8 : 0);
+      const pw = px1 - px0, ph = py1 - py0;
+
+      // Price range across candles AND visible overlays, so nothing is clipped.
+      let mn = Infinity, mx = -Infinity;
+      for (let i = 0; i < n; i++) { if (lo[i] < mn) mn = lo[i]; if (hi[i] > mx) mx = hi[i]; }
+      const consider = [];
+      if (ON.ema9) consider.push(SER.ema9);
+      if (ON.ema21) consider.push(SER.ema21);
+      if (ON.vwap) consider.push(SER.vwap);
+      if (ON.bb) { consider.push(SER.bb.upper, SER.bb.lower); }
+      if (ON.st) consider.push(SER.st.line);
+      consider.forEach(arr => arr && arr.forEach(x => { if (x != null) { if (x < mn) mn = x; if (x > mx) mx = x; } }));
+      const lvls = [];
+      if (ON.gex && GEX && !GEX.unreliable) {
+        [['flip',GEX.flip],['callWall',GEX.callWall],['putWall',GEX.putWall],['maxPain',GEX.maxPain]]
+          .forEach(([k,val]) => { if (val) lvls.push([k, +val]); });
+        // Only widen the scale for levels that are near price, or one distant wall
+        // would squash the candles into a flat line.
+        const span = mx - mn || 1;
+        lvls.forEach(([, val]) => { if (val > mn - span*0.6 && val < mx + span*0.6) { if (val<mn) mn=val; if (val>mx) mx=val; } });
+      }
+      const pad = (mx - mn) * 0.06 || 1;
+      mn -= pad; mx += pad;
+      const Y = p => py1 - ((p - mn) / (mx - mn)) * ph;
+      const X = i => px0 + (i + 0.5) * (pw / n);
+
+      // Grid + price axis
+      ctx.strokeStyle = 'rgba(31,41,55,0.55)'; ctx.lineWidth = 1;
+      ctx.fillStyle = '#6b7280'; ctx.font = '10px system-ui,sans-serif'; ctx.textAlign = 'left';
+      const steps = 5;
+      for (let s = 0; s <= steps; s++) {
+        const p = mn + (mx - mn) * (s / steps), y = Math.round(Y(p)) + 0.5;
+        ctx.beginPath(); ctx.moveTo(px0, y); ctx.lineTo(px1, y); ctx.stroke();
+        ctx.fillText(fmt(p, p > 1000 ? 0 : 1), px1 + 6, y + 3);
+      }
+
+      // ── Time axis ──
+      // Intraday data spanning several sessions must show WHICH day, otherwise the
+      // labels read 09:15 -> 11:50 -> 14:25 -> 10:55 and look like broken data when
+      // it is simply the next session. Day boundaries get a separator + a date.
+      ctx.textAlign = 'center';
+      const dayKey = i => new Date(ts[i]).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const dayStarts = [];
+      for (let i = 0; i < n; i++) if (i === 0 || dayKey(i) !== dayKey(i - 1)) dayStarts.push(i);
+      const multiDay = dayStarts.length > 1;
+
+      // Session separators
+      if (multiDay && iv !== 'ONE_DAY') {
+        ctx.save(); ctx.strokeStyle = 'rgba(96,165,250,0.28)'; ctx.setLineDash([3,3]);
+        dayStarts.slice(1).forEach(i => {
+          const x = Math.round(X(i) - (pw / n) / 2) + 0.5;
+          ctx.beginPath(); ctx.moveTo(x, py0); ctx.lineTo(x, h - PAD.b); ctx.stroke();
+        });
+        ctx.restore();
+      }
+
+      // Build tick list, then drop any that would overlap its neighbour.
+      const ticks = [];
+      if (iv === 'ONE_DAY') {
+        const step = Math.max(1, Math.floor(n / 7));
+        for (let i = 0; i < n; i += step) ticks.push({ i, lbl: new Date(ts[i]).toLocaleDateString('en-IN', { day:'2-digit', month:'short', timeZone:'Asia/Kolkata' }), strong: true });
+      } else {
+        const step = Math.max(1, Math.floor(n / 8));
+        for (let i = 0; i < n; i += step) {
+          ticks.push({ i, lbl: new Date(ts[i]).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:false, timeZone:'Asia/Kolkata' }), strong: false });
+        }
+        if (multiDay) {
+          dayStarts.forEach(i => ticks.push({ i, lbl: new Date(ts[i]).toLocaleDateString('en-IN', { day:'2-digit', month:'short', timeZone:'Asia/Kolkata' }), strong: true }));
+        }
+      }
+      // Date labels win over time labels when they compete for the same space.
+      ticks.sort((a, b) => a.i - b.i || (b.strong - a.strong));
+      const placed = [];
+      ticks.forEach(t => {
+        const x = X(t.i);
+        const clash = placed.find(p => Math.abs(p.x - x) < 46);
+        if (clash) { if (t.strong && !clash.strong) { clash.x = x; clash.lbl = t.lbl; clash.strong = true; } return; }
+        placed.push({ x, lbl: t.lbl, strong: t.strong, i: t.i });
+      });
+      placed.forEach(p => {
+        ctx.fillStyle = p.strong ? '#93a4bd' : '#6b7280';
+        ctx.font = (p.strong ? 'bold ' : '') + '10px system-ui,sans-serif';
+        ctx.fillText(p.lbl, Math.min(px1 - 18, Math.max(px0 + 18, p.x)), h - 8);
+        ctx.strokeStyle = 'rgba(31,41,55,0.35)';
+        ctx.beginPath(); ctx.moveTo(Math.round(p.x)+0.5, py0); ctx.lineTo(Math.round(p.x)+0.5, py1); ctx.stroke();
+      });
+      ctx.font = '10px system-ui,sans-serif';
+
+      // Bollinger band fill first, so candles draw on top of it
+      if (ON.bb) {
+        ctx.fillStyle = 'rgba(107,114,128,0.10)';
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) { const u = SER.bb.upper[i]; if (u == null) continue; if (!started) { ctx.moveTo(X(i), Y(u)); started = true; } else ctx.lineTo(X(i), Y(u)); }
+        for (let i = n - 1; i >= 0; i--) { const l2 = SER.bb.lower[i]; if (l2 == null) continue; ctx.lineTo(X(i), Y(l2)); }
+        ctx.closePath(); ctx.fill();
+        line(SER.bb.mid, 'rgba(107,114,128,0.75)', 1, [4,3]);
+      }
+
+      // Candles
+      const cw = Math.max(1, Math.min(14, (pw / n) * 0.68));
+      for (let i = 0; i < n; i++) {
+        const up = c[i] >= o[i];
+        const col = up ? '#34d399' : '#f87171';
+        const x = X(i);
+        ctx.strokeStyle = col; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(Math.round(x)+0.5, Y(hi[i])); ctx.lineTo(Math.round(x)+0.5, Y(lo[i])); ctx.stroke();
+        const yO = Y(o[i]), yC = Y(c[i]);
+        const top = Math.min(yO, yC), bh = Math.max(1, Math.abs(yC - yO));
+        ctx.fillStyle = col;
+        ctx.fillRect(x - cw/2, top, cw, bh);
+      }
+
+      // Overlays
+      function line(arr, colour, lw, dash) {
+        if (!arr) return;
+        ctx.save(); ctx.strokeStyle = colour; ctx.lineWidth = lw || 1.4;
+        if (dash) ctx.setLineDash(dash);
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < n; i++) {
+          const val = arr[i]; if (val == null) continue;
+          const x = X(i), y = Y(val);
+          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke(); ctx.restore();
+      }
+      if (ON.ema9)  line(SER.ema9,  '#60a5fa', 1.4);
+      if (ON.ema21) line(SER.ema21, '#f59e0b', 1.4);
+      if (ON.vwap)  line(SER.vwap,  '#a78bfa', 1.4, [5,3]);
+
+      // SuperTrend, coloured by direction (breaks the path when it flips)
+      if (ON.st) {
+        ctx.save(); ctx.lineWidth = 1.6;
+        let i = 0;
+        while (i < n) {
+          if (SER.st.line[i] == null) { i++; continue; }
+          const d0 = SER.st.dir[i];
+          ctx.strokeStyle = d0 === 1 ? '#10b981' : '#ef4444';
+          ctx.beginPath(); ctx.moveTo(X(i), Y(SER.st.line[i]));
+          let j = i + 1;
+          while (j < n && SER.st.dir[j] === d0 && SER.st.line[j] != null) { ctx.lineTo(X(j), Y(SER.st.line[j])); j++; }
+          ctx.stroke(); i = j;
+        }
+        ctx.restore();
+      }
+
+      // Dealer / GEX levels — the genuinely useful part no retail chart shows.
+      if (ON.gex && lvls.length) {
+        const meta = {
+          flip:     ['#f59e0b', 'Zero-gamma flip'],
+          callWall: ['#ef4444', 'Call wall'],
+          putWall:  ['#10b981', 'Put wall'],
+          maxPain:  ['#a78bfa', 'Max pain'],
+        };
+        ctx.save(); ctx.setLineDash([6,4]); ctx.lineWidth = 1.1; ctx.font = '9.5px system-ui,sans-serif';
+        ctx.textAlign = 'left';
+        // Levels frequently coincide (flip and max pain are often the same strike).
+        // Draw every line, but stack the LABELS so they never overprint each other
+        // into unreadable mush.
+        const drawn = lvls
+          .filter(([, val]) => val >= mn && val <= mx) // off-scale: don't fake it
+          .map(([k, val]) => ({ k, val, y: Y(val) }))
+          .sort((a, b) => a.y - b.y);
+        let lastLabelY = -Infinity;
+        drawn.forEach(({ k, val, y }) => {
+          const [col, label] = meta[k];
+          const ly = Math.round(y) + 0.5;
+          ctx.strokeStyle = col;
+          ctx.beginPath(); ctx.moveTo(px0, ly); ctx.lineTo(px1, ly); ctx.stroke();
+          let ty = ly - 3;
+          if (ty - lastLabelY < 11) ty = lastLabelY + 11; // nudge down to clear the previous one
+          lastLabelY = ty;
+          ctx.fillStyle = col;
+          ctx.fillText(label + ' ' + val, px0 + 4, ty);
+        });
+        ctx.restore();
+      }
+
+      // Volume panel (stocks only — index volume is 0 from the feed)
+      if (volH) {
+        const vy1 = h - PAD.b, vy0 = vy1 - volH;
+        let vmax = 0; for (let i = 0; i < n; i++) if (v[i] > vmax) vmax = v[i];
+        if (vmax > 0) {
+          for (let i = 0; i < n; i++) {
+            const bh = (v[i] / vmax) * volH;
+            ctx.fillStyle = c[i] >= o[i] ? 'rgba(52,211,153,0.45)' : 'rgba(248,113,113,0.45)';
+            ctx.fillRect(X(i) - cw/2, vy1 - bh, cw, bh);
+          }
+          ctx.fillStyle = '#6b7280'; ctx.font = '9px system-ui,sans-serif'; ctx.textAlign = 'left';
+          ctx.fillText('Vol', px0 + 2, vy0 + 9);
+        }
+      }
+
+      // Last price marker
+      const last = c[n-1], lastUp = last >= o[n-1];
+      ctx.fillStyle = lastUp ? '#10b981' : '#ef4444';
+      const ly = Math.round(Y(last)) + 0.5;
+      ctx.fillRect(px1, ly - 8, PAD.r - 2, 16);
+      ctx.fillStyle = '#0a0e17'; ctx.font = 'bold 10px system-ui,sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(fmt(last, last > 1000 ? 0 : 1), px1 + 4, ly + 3);
+      ctx.save(); ctx.setLineDash([3,3]); ctx.strokeStyle = lastUp ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.5)';
+      ctx.beginPath(); ctx.moveTo(px0, ly); ctx.lineTo(px1, ly); ctx.stroke(); ctx.restore();
+
+      // Crosshair
+      if (hoverIdx >= 0 && hoverIdx < n) {
+        const x = Math.round(X(hoverIdx)) + 0.5;
+        ctx.save(); ctx.setLineDash([2,3]); ctx.strokeStyle = 'rgba(156,163,175,0.6)';
+        ctx.beginPath(); ctx.moveTo(x, py0); ctx.lineTo(x, py1); ctx.stroke(); ctx.restore();
+      }
+      showOHLC(hoverIdx >= 0 ? hoverIdx : n - 1);
+    }
+
+    function showOHLC(i) {
+      if (!C || !C.count) return;
+      const { opens:o, highs:hi, lows:lo, closes:c, volumes:v, timestamps:ts } = C;
+      const up = c[i] >= o[i], col = up ? '#34d399' : '#f87171';
+      const chg = i > 0 ? c[i] - c[i-1] : 0;
+      const chgPct = i > 0 && c[i-1] ? (chg / c[i-1] * 100) : 0;
+      const d = new Date(ts[i]);
+      const when = d.toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12:false, timeZone:'Asia/Kolkata' });
+      const g = (SER && SER.hasVol && v[i]) ? ' · <span class="text-muted">V</span> <b>' + v[i].toLocaleString('en-IN') + '</b>' : '';
+      document.getElementById('ohlc').innerHTML =
+        '<b style="color:' + col + '">' + (OPT ? (OPT.symbol + ' ' + OPT.strike + ' ' + OPT.type) : sym) + '</b>' +
+        '<span class="text-muted">' + when + '</span>' +
+        '<span><span class="text-muted">O</span> <b>' + fmt(o[i],1) + '</b></span>' +
+        '<span><span class="text-muted">H</span> <b>' + fmt(hi[i],1) + '</b></span>' +
+        '<span><span class="text-muted">L</span> <b>' + fmt(lo[i],1) + '</b></span>' +
+        '<span><span class="text-muted">C</span> <b style="color:' + col + '">' + fmt(c[i],1) + '</b></span>' +
+        '<span style="color:' + (chg>=0?'#34d399':'#f87171') + '">' + (chg>=0?'+':'') + fmt(chg,1) + ' (' + (chg>=0?'+':'') + chgPct.toFixed(2) + '%)</span>' + g;
+    }
+
+    cv.addEventListener('mousemove', e => {
+      if (!C || !C.count) return;
+      const r = cv.getBoundingClientRect();
+      const pw = r.width - 6 - 64;
+      const i = Math.floor(((e.clientX - r.left) - 6) / (pw / C.count));
+      const ni = Math.max(0, Math.min(C.count - 1, i));
+      if (ni !== hoverIdx) { hoverIdx = ni; draw(); }
+    });
+    cv.addEventListener('mouseleave', () => { hoverIdx = -1; draw(); });
+    window.addEventListener('resize', () => draw());
+
+    // ── Indicators (unchanged logic, Angel One data) ─────────────────────────
+    async function loadInd() {
+      const el = document.getElementById('ind');
+      const c = C;
+      if (!c || c.count < 20) { el.innerHTML = '<div class="card"><p class="text-muted">Indicator data unavailable (market may be closed or symbol illiquid).</p></div>'; return; }
+      const { opens, highs, lows, closes, volumes } = c;
+      const ltp = closes[closes.length-1];
+      const rsi = RSI(closes), macd = MACD(closes), atr = ATR(highs,lows,closes), bb = bollinger(closes), st = superTrend(highs,lows,closes), vw = VWAP(highs,lows,closes,volumes), e9 = EMA(closes,9), e21 = EMA(closes,21), s20 = SMA(closes,20);
+      const ph=highs[highs.length-2], pl=lows[lows.length-2], pc=closes[closes.length-2], pp=(ph+pl+pc)/3;
+      const rc = rsi.latest>70?'text-red':rsi.latest<30?'text-green':'text-blue';
+      const mc = macd.hist>0?'text-green':'text-red';
+      const sc2 = st==='bullish'?'text-green':'text-red';
+      const vc = ltp>vw?'text-green':'text-red';
+      const vwLabel = (SER && SER.vwapTrue) ? 'VWAP' : 'TWAP';
+      let gexCards = '';
+      if (GEX && !GEX.unreliable) {
+        gexCards =
+          card('Dealer Regime', '<span class="' + (GEX.regime==='Negative Gamma'?'text-green':'text-red') + '">' + (GEX.regime||'—') + '</span>', GEX.regime==='Negative Gamma'?'Moves amplified':'Moves suppressed') +
+          card('Zero-Gamma Flip', '<span class="text-blue">' + (GEX.flip||'—') + '</span>', ltp > GEX.flip ? 'Spot above flip' : 'Spot below flip') +
+          card('Call Wall', '<span class="text-red">' + (GEX.callWall||'—') + '</span>', 'Upside magnet / resistance') +
+          card('Put Wall', '<span class="text-green">' + (GEX.putWall||'—') + '</span>', 'Downside support');
+      }
+      el.innerHTML = '<div class="grid grid-4" style="gap:0.75rem">'+
+        card('RSI (14)', '<span class="'+rc+'">'+(rsi.latest?rsi.latest.toFixed(1):'—')+'</span>', rsi.latest>70?'Overbought':rsi.latest<30?'Oversold':'Neutral')+
+        card('MACD Hist', '<span class="'+mc+'">'+(macd.hist!==null?macd.hist.toFixed(2):'—')+'</span>', 'Signal: '+(macd.signal?macd.signal.toFixed(2):'—'))+
+        card('SuperTrend', '<span class="'+sc2+'">'+st.toUpperCase()+'</span>', '10, 3.0')+
+        card(vwLabel, '<span class="'+vc+'">'+(vw?fmt(vw,1):'—')+'</span>', ltp>vw?'Price above':'Price below')+
+        card('ATR (14)', (atr?fmt(atr,1):'—'), 'Volatility')+
+        card('Bollinger', 'U '+(bb.upper?fmt(bb.upper,0):'—'), 'M '+(bb.mid?fmt(bb.mid,0):'—')+' L '+(bb.lower?fmt(bb.lower,0):'—'))+
+        card('EMAs', '9: '+(e9?fmt(e9,0):'—'), '21: '+(e21?fmt(e21,0):'—')+' · SMA20: '+(s20?fmt(s20,0):'—'))+
+        card('Pivot', '<span class="text-blue">PP '+fmt(pp,0)+'</span>', 'R1 '+fmt(2*pp-pl,0)+' · S1 '+fmt(2*pp-ph,0))+
+        gexCards +
+      '</div>';
+    }
+    function card(t,v,s){ return '<div class="card" style="padding:0.75rem"><div class="card-title">'+t+'</div><div class="num font-bold" style="font-size:1.2rem;margin-top:0.25rem">'+v+'</div><div class="text-xs text-muted">'+s+'</div></div>'; }
+
+    reload();
+    // Refresh during market hours only.
+    setInterval(() => {
+      const i = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
+      const d = i.getDay(), t = i.getHours()*60 + i.getMinutes();
+      if (d !== 0 && d !== 6 && t >= 555 && t <= 930) reload();
+    }, 30000);
+  </script>
+</body>
+</html>
