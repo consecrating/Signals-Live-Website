@@ -142,7 +142,7 @@ define('API_BASE', 'https://apiconnect.angelone.in');
 
 // Bump on every deploy. Pages compare their embedded build to this and prompt a
 // reload when they differ, so a stale open tab can no longer masquerade as a bug.
-define('APP_BUILD', '2026-08-28-r13');
+define('APP_BUILD', '2026-08-28-r14');
 
 // ── AI Paper Trading budget — SINGLE SOURCE OF TRUTH ────────────────────────
 // These MUST stay in step with INITIAL_CAPITAL / MAX_PER_TRADE in js/paper-trading.js.

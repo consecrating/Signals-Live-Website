@@ -23,7 +23,7 @@ import { postJSON, authedFetch, primeWriteAuth } from './core/write-auth.js?v=1.
 import { godBrain } from './god-mode.js?v=2.5';
 
 const PROXY = '/signals/api/proxy.php';
-const PT_VERSION = '4.5.0'; // Audited execution diagnostics + confidence-based profit booking
+const PT_VERSION = '4.6.0'; // Reward/risk measured to T2 runner target (0.90 floor kept)
 // Server-owned state. There is deliberately NO localStorage key here: browser
 // storage made the numbers device-specific and let stale state survive config
 // changes. The server is the single source of truth.
@@ -860,7 +860,16 @@ export class PaperTradingEngine {
     }
     const premium = Number(trade.entryPremium);
     const risk = premium - Number(trade.stopLoss?.premium || 0);
-    const reward = Number(trade.targets?.[0]?.premium || 0) - premium;
+    // Reward is measured to T2 (the runner target), not T1. The engine places T1 at
+    // ~1.0*ATR but the stop at ~1.2*ATR, so a T1-only reward/risk is structurally
+    // below the 0.90 floor and rejected nearly every confirmed setup. After T1 the
+    // stop moves to breakeven and the position trails toward T2, so T1->T2 is the
+    // reward leg that actually reflects the trade's risk profile. The 0.90 floor is
+    // unchanged; only the target the ratio is measured against is corrected. Falls
+    // back to T1 if a T2 level is somehow absent.
+    const t1Premium = Number(trade.targets?.[0]?.premium || 0);
+    const rewardTarget = Number(trade.targets?.[1]?.premium || 0) || t1Premium;
+    const reward = rewardTarget - premium;
     const rr = risk > 0 ? reward / risk : 0;
     if (!(risk > 0) || !(reward > 0) || rr < 0.9) {
       return finish({ executed: false, reason: `Unacceptable option reward/risk ${rr.toFixed(2)} (minimum 0.90)` }, { rewardRisk: rr });
