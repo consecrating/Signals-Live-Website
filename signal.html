@@ -66,7 +66,7 @@
     } catch (e) {}
   </script>
   <script type="module">
-    import { INSTRUMENTS, buildSnapshot, generateSignal, buildOptionTrade, expertAdvice, getCandles, EMA, fmt, inr } from './js/live-engine.js?v=3.9';
+    import { INSTRUMENTS, buildSnapshot, generateSignal, buildOptionTrade, expertAdvice, getCandles, EMA, fmt, inr } from './js/live-engine.js?v=4.0';
     import { godBrain } from './js/god-mode.js?v=2.5';
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
@@ -775,34 +775,47 @@
      * Returns the verdict so both the headline and the panel use one source.
      */
     function computeCoherence(s) {
+      // MEAN-REVERSION COHERENCE. The engine now FADES stretched extremes, so it
+      // deliberately trades against the short-term trend. Scoring trend-following
+      // reads (DI, 1H, gamma) as "votes" therefore flagged almost every fade as
+      // "conflicted / noise" — wrong. The voting reads are now the fade-setup
+      // factors (they should agree with the direction and with each other); the
+      // trend indicators are shown as CONTEXT (what is being faded), not votes.
       const st = s.strategy || {}, gx = st.gex || {};
+      const comps = s.components || {};
       const reads = [];
       const dirOf = v => v > 0 ? 1 : v < 0 ? -1 : 0;
 
+      // ── Voting reads: the mean-reversion setup ──
       reads.push({ name: 'Engine score', v: dirOf(s.netScore),
                    detail: (s.netScore >= 0 ? '+' : '') + s.netScore });
-      if (st.adx != null && st.plusDI != null && st.minusDI != null) {
-        reads.push({ name: 'Directional index', v: dirOf(st.plusDI - st.minusDI),
-                     detail: '+DI ' + st.plusDI + ' / -DI ' + st.minusDI });
-      }
-      if (st.mtf && st.mtf !== 'n/a') {
-        reads.push({ name: 'Higher timeframe (1H)', v: st.mtf === 'Bullish' ? 1 : -1, detail: st.mtf });
-      }
-      if (gx.flip && s.ltp) {
-        reads.push({ name: 'Dealer gamma flip', v: dirOf(s.ltp - gx.flip),
-                     detail: 'spot ' + (s.ltp >= gx.flip ? 'above' : 'below') + ' ' + gx.flip });
-      }
-      if (st.orb && /up|down/i.test(String(st.orb.state || st.orb))) {
-        const up = /up/i.test(String(st.orb.state || st.orb));
-        reads.push({ name: 'Opening range', v: up ? 1 : -1, detail: String(st.orb.state || st.orb) });
-      }
+      if (comps.reversion) reads.push({ name: 'Stretch from mean', v: dirOf(comps.reversion.bias),
+                   detail: comps.reversion.bias > 0 ? 'below mean — fade up' : comps.reversion.bias < 0 ? 'above mean — fade down' : 'at mean' });
+      if (comps.extremeFade) reads.push({ name: 'Range / Bollinger', v: dirOf(comps.extremeFade.bias),
+                   detail: comps.extremeFade.bias > 0 ? 'oversold edge' : comps.extremeFade.bias < 0 ? 'overbought edge' : 'mid-range' });
+      if (comps.rsiFade) reads.push({ name: 'RSI extreme', v: dirOf(comps.rsiFade.bias),
+                   detail: s.rsi != null ? ('RSI ' + s.rsi) : '' });
+      if (comps.options && comps.options.bias) reads.push({ name: 'Options positioning', v: dirOf(comps.options.bias),
+                   detail: 'PCR / dealer flow' });
       if (s._godConfidence != null) {
         // God Mode expresses conviction, not direction. A low score is a vote
-        // against acting, not a vote for the opposite side. Rounded — it was
-        // rendering raw floats like "30.158%".
+        // against acting, not a vote for the opposite side.
         const gc = Math.round(s._godConfidence);
         reads.push({ name: 'God Mode conviction', v: gc >= 60 ? dirOf(s.netScore) : 0,
                      detail: gc + '%' + (gc < 60 ? ' (too low to endorse)' : '') });
+      }
+
+      // ── Context reads (NON-VOTING): the trend the fade is trading against ──
+      const dir1 = dirOf(s.netScore);
+      if (st.mtf && st.mtf !== 'n/a') {
+        const tv = st.mtf === 'Bullish' ? 1 : -1;
+        reads.push({ name: 'Higher timeframe (1H)', v: 0, detail: st.mtf + (tv === -dir1 && dir1 !== 0 ? ' — being faded' : ' — aligned') });
+      }
+      if (st.adx != null && st.plusDI != null && st.minusDI != null) {
+        reads.push({ name: 'Trend context (DI/ADX)', v: 0, detail: 'ADX ' + st.adx + ' · +DI ' + st.plusDI + ' / -DI ' + st.minusDI });
+      }
+      if (gx.flip && s.ltp) {
+        reads.push({ name: 'Dealer gamma flip', v: 0, detail: 'spot ' + (s.ltp >= gx.flip ? 'above' : 'below') + ' ' + gx.flip });
       }
 
       const voting = reads.filter(r => r.v !== 0);
@@ -812,7 +825,7 @@
       const align = total ? Math.round(Math.max(bull, bear) / total * 100) : 0;
       const noData = total === 0;
       const lean = bull > bear ? 'BULLISH' : bear > bull ? 'BEARISH' : 'SPLIT';
-      const conflicted = !noData && (align < 70 || (bull > 0 && bear > 0 && Math.min(bull, bear) >= 2));
+      const conflicted = !noData && (align < 65 || (bull > 0 && bear > 0 && Math.min(bull, bear) >= 2));
       return { reads, bull, bear, total, align, lean, conflicted, noData };
     }
 
