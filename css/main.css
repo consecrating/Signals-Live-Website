@@ -950,3 +950,72 @@ input[type="range"]::-webkit-slider-thumb {
 .w-full { width: 100%; }
 .overflow-auto { overflow: auto; }
 .hidden { display: none; }
+
+
+/* ─── Mobile Nav (hamburger dropdown) ──────────────────────────────────────── */
+/* Injected by js/core/mobile-nav.js. Hidden on desktop; on small screens the
+   flat link row collapses into a tap-to-open dropdown so all destinations stay
+   reachable instead of overflowing the 56px bar. */
+.nav-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.nav-toggle:hover { border-color: var(--border-active); }
+.nav-toggle span {
+  display: block;
+  height: 2px;
+  width: 100%;
+  background: var(--text-primary);
+  border-radius: 2px;
+  transition: transform 0.25s ease, opacity 0.2s ease;
+}
+.navbar.nav-open .nav-toggle span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+.navbar.nav-open .nav-toggle span:nth-child(2) { opacity: 0; }
+.navbar.nav-open .nav-toggle span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+@media (max-width: 820px) {
+  .nav-toggle { display: flex; margin-left: 0.6rem; }
+  .navbar { gap: 0.5rem; }
+
+  /* Links become a full-width dropdown anchored under the sticky bar. */
+  .navbar .nav-links {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.4rem 0.75rem 0.7rem;
+    background: rgba(10, 14, 23, 0.98);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    display: none;
+  }
+  .navbar.nav-open .nav-links { display: flex; }
+  .navbar .nav-links a {
+    display: block;
+    padding: 0.75rem 0.7rem;
+    font-size: 0.95rem;
+    border-radius: var(--radius-sm);
+  }
+  /* Keep brand from pushing the toggle off-screen on very small phones. */
+  .navbar-brand span { font-size: 1.02rem; }
+}
+
+@media (max-width: 380px) {
+  .navbar-brand span { display: none; } /* logo mark alone on tiny screens */
+  .risk-banner { font-size: 0.6rem; padding: 0.35rem 0.6rem; }
+}

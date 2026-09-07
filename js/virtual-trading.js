@@ -18,7 +18,8 @@
  * a background monitor tab and a manual click cannot silently clobber each other.
  *
  * PAPER/SIMULATION ONLY. No real orders are ever placed. Prices are the same live
- * option quotes the rest of the site uses; fills model spread/impact slippage.
+ * option quotes the rest of the site uses; fills execute at the live premium (no
+ * synthetic slippage) so P&L reflects the real option move.
  */
 
 import { postJSON } from './core/write-auth.js?v=1.0';
@@ -33,13 +34,20 @@ const _uuid = () => (globalThis.crypto?.randomUUID?.() || (Date.now() + '-' + Ma
 const _round2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
 const _nowIso = () => new Date().toISOString();
 
-/** Compact spread + impact + delay slippage model (mirrors the paper desk). */
+/**
+ * Execution friction model (mirrors the paper desk).
+ *
+ * Fills now execute at the EXACT live premium — no synthetic entry/exit friction.
+ * The previous model added ~2.3% on entry (spread + impact + delay), which on
+ * index-option premiums of ₹300-400 pushed the fill 7-9 points above the live
+ * quote and marked every fresh position at an instant loss. Product requirement:
+ * a manual buy fills at the premium the user actually sees. Entry == live premium,
+ * exit == live premium, so a flat market nets ₹0 rather than a fabricated loss.
+ * Kept as a function (returning zeros) so all downstream slippage fields/stats
+ * keep working and a realistic model can be reintroduced in one place if desired.
+ */
 function slippage(premium) {
-  const p = Number(premium) || 0;
-  const spreadPct = p < 20 ? 0.02 : p < 50 ? 0.015 : 0.01;
-  const entry = p * (spreadPct + 0.01 + 0.003); // spread + impact + delay
-  const exit  = p * (spreadPct + 0.01);         // no delay leg on a market exit
-  return { entry: _round2(entry), exit: _round2(exit) };
+  return { entry: 0, exit: 0 };
 }
 
 /** IST minutes-of-day helper for market-hours + time schedules. */

@@ -8,6 +8,10 @@
   <meta http-equiv="Expires" content="0">
   <title>FNO Signal Pro — Signal Generator</title>
   <link rel="stylesheet" href="css/main.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <meta name="theme-color" content="#0a0e17">
+  <script src="js/core/mobile-nav.js" defer></script>
 </head>
 <body>
   <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
@@ -28,7 +32,7 @@
 
   <main class="page-container">
     <section class="flex items-center justify-between" style="flex-wrap:wrap;gap:0.75rem">
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2" style="flex-wrap:wrap">
         <div>
           <label for="sym">Instrument</label>
           <select id="sym"></select>
@@ -363,7 +367,7 @@
       q('#vt-cancel').addEventListener('click', close);
 
       const entryOf = () => { const s = currentSignal; const t = (s && (s.optionTrade || s.watchTrade)) || {}; return { t, entry: Number(t.livePremium) || Number(t.entryPremium) || 0, lotSize: Number(t.lotSize) || 1 }; };
-      const costPreview = () => { const { entry, lotSize } = entryOf(); const lots = Math.max(1, parseInt(q('#vt-lots').value || '1', 10)); const cost = Math.round(entry * lots * lotSize * 1.023); q('#vt-cost').textContent = '≈ ₹' + cost.toLocaleString('en-IN') + ' (' + (lots * lotSize) + ' qty incl. slippage)'; };
+      const costPreview = () => { const { entry, lotSize } = entryOf(); const lots = Math.max(1, parseInt(q('#vt-lots').value || '1', 10)); const cost = Math.round(entry * lots * lotSize); q('#vt-cost').textContent = '≈ ₹' + cost.toLocaleString('en-IN') + ' (' + (lots * lotSize) + ' qty @ live premium)'; };
       const syncSched = () => { const k = q('#vt-sched-kind').value; q('#vt-sched-time-row').style.display = k === 'time' ? 'block' : 'none'; q('#vt-sched-price-row').style.display = (k === 'above' || k === 'below') ? 'block' : 'none'; };
       q('#vt-lots').addEventListener('input', costPreview);
       q('#vt-sched-kind').addEventListener('change', syncSched);

@@ -94,26 +94,22 @@ const STRATEGIES = {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class SlippageModel {
-  // Simulates real-world execution friction
+  // Execution friction is DISABLED — paper fills occur at the exact live premium.
+  //
+  // The previous model added spread + impact + delay (~1.8% on index premiums) to
+  // every entry and shaved it off every exit. On ₹300-400 premiums that pushed the
+  // entry 7-9 points above the live quote, so a position opened showing an instant
+  // loss and needed a ~3.3% round-trip move just to break even. Product decision:
+  // fill at the displayed live premium so P&L reflects the real option move. The
+  // model is retained (returning zeros) so every downstream slippage field and the
+  // totalSlippage stat keep working, and a realistic model can return here later.
   calculate(premium, lotSize, volumeRatio) {
-    // Bid-ask spread: ~0.5-1.5% of premium for index options
-    const spreadPct = premium < 20 ? 0.02 : premium < 50 ? 0.015 : 0.01;
-    const spreadCost = premium * spreadPct;
-
-    // Impact cost: if volume is low, moving the market costs more
-    const impactPct = volumeRatio < 0.5 ? 0.02 : volumeRatio < 1.0 ? 0.01 : 0.005;
-    const impactCost = premium * impactPct;
-
-    // Execution delay: premium moves ~0.3% in 2-5 seconds typical
-    const delayCost = premium * 0.003;
-
-    const totalSlippage = spreadCost + impactCost + delayCost;
     return {
-      entrySlippage: Math.round(totalSlippage * 100) / 100,
-      exitSlippage: Math.round((spreadCost + impactCost) * 100) / 100, // No delay on exit (market order)
-      totalPerUnit: Math.round((totalSlippage * 2) * 100) / 100, // Round-trip
-      totalPerLot: Math.round(totalSlippage * 2 * lotSize),
-      breakdown: { spread: spreadCost, impact: impactCost, delay: delayCost },
+      entrySlippage: 0,
+      exitSlippage: 0,
+      totalPerUnit: 0,
+      totalPerLot: 0,
+      breakdown: { spread: 0, impact: 0, delay: 0 },
     };
   }
 }

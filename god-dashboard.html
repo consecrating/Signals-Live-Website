@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>God Mode — Control Plane</title>
   <link rel="stylesheet" href="css/main.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <meta name="theme-color" content="#0a0e17">
+  <script src="js/core/mobile-nav.js" defer></script>
   <style>
     :root { --gm-bd:#1f2937; --gm-bg:#0d1420; }
     .gm-grid { display:grid; gap:0.9rem; }
@@ -89,7 +93,8 @@
       <li><a href="scan.html">Scanner</a></li>
       <li><a href="chart.html">Charts</a></li>
       <li><a href="tool.html">Paper Trade</a></li>
-      <li><a href="god-dashboard.html" class="active" style="color:var(--primary);background:var(--primary-dim)">God Mode</a></li>
+      <li><a href="virtual.html" style="color:#c4b5fd">Virtual Trade</a></li>
+      <li><a href="god-dashboard.html" class="active" style="color:#a78bfa;background:rgba(167,139,250,0.12)">God Mode</a></li>
     </ul>
     <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
   </nav>
@@ -234,7 +239,7 @@
     import { godBrain } from './js/god-mode.js?v=2.4';
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
-    startBuildCheck('2026-08-26-r10');
+    startBuildCheck('2026-08-28-r15');
 
     // Evict keys written by older builds; all state is server-owned now.
     try {

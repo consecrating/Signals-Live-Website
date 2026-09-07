@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FNO Signal Pro — Virtual Trading (Manual)</title>
   <link rel="stylesheet" href="css/main.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <meta name="theme-color" content="#0a0e17">
+  <script src="js/core/mobile-nav.js" defer></script>
   <style>
     .vt-header{background:linear-gradient(135deg,#3b1a5c,#1a2a4a);padding:1.5rem;border-radius:12px;margin-bottom:1.2rem;border:1px solid rgba(167,139,250,0.35)}
     .vt-header h1{margin:0;font-size:1.5rem;color:#c4b5fd;display:flex;align-items:center;gap:0.5rem}
@@ -88,7 +92,7 @@
     <div class="section-title">📝 Journal</div>
     <div id="journal"></div>
 
-    <p class="text-xs muted" style="margin-top:1.5rem">Virtual desk v<span id="vt-ver">?</span> · Simulated fills include spread/impact slippage · Scheduled &amp; bracket exits require this tab (or Signals) to stay open, since evaluation runs in the browser.</p>
+    <p class="text-xs muted" style="margin-top:1.5rem">Virtual desk v<span id="vt-ver">?</span> · Simulated fills execute at the live premium · Scheduled &amp; bracket exits require this tab (or Signals) to stay open, since evaluation runs in the browser.</p>
   </main>
 
   <script type="module">
