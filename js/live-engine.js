@@ -357,17 +357,66 @@ export function generateSignal(snapshot, opts = {}) {
   // VWAP. Live MIDCPNIFTY was carrying a -3.0 volume penalty on no volume at all.
   // When there is no real volume the component is now declared unavailable, and its
   // weight is redistributed so the score stays on the same -100..100 scale.
+  // FOR AN INDEX the volume that actually exists is the OPTION CHAIN's. An index is
+  // not itself traded — its constituents are — which is why the spot feed is zero.
+  // But the thing this engine actually buys IS traded and does report volume, and
+  // ?action=gex already returns it per strike as ceVol/peVol. So for indices volume
+  // is now measured from the chain instead of being reported as simply absent.
   let vb = 0;
   const _volSum = (volumes && volumes.length) ? volumes.reduce((s, x) => s + (x || 0), 0) : 0;
-  const _hasVolume = _volSum > 0;
-  if (_hasVolume && volumes.length >= 10) {
+  const _hasSpotVolume = _volSum > 0;
+
+  let _optVol = null;
+  const _gexStrikes = (snapshot.gex && Array.isArray(snapshot.gex.strikes)) ? snapshot.gex.strikes : null;
+  if (_gexStrikes && _gexStrikes.length) {
+    const _stepV = Number(snapshot.strikeStep) || STRIKE_STEPS[symbol] || 50;
+    const _atmV = Math.round(ltp / _stepV) * _stepV;
+    let ce = 0, pe = 0, atmCe = 0, atmPe = 0;
+    for (const r of _gexStrikes) {
+      const c = Number(r.ceVol) || 0, p = Number(r.peVol) || 0;
+      ce += c; pe += p;
+      if (Math.abs(Number(r.strike) - _atmV) <= _stepV) { atmCe += c; atmPe += p; }
+    }
+    if (ce + pe > 0) {
+      _optVol = {
+        source: 'option-chain',
+        totalCallVolume: ce, totalPutVolume: pe, total: ce + pe,
+        atmCallVolume: atmCe, atmPutVolume: atmPe, atmTotal: atmCe + atmPe,
+        putCallVolumeRatio: ce > 0 ? Math.round((pe / ce) * 1000) / 1000 : null,
+        strikesCounted: _gexStrikes.length,
+        atmStrike: _atmV,
+      };
+    }
+  }
+
+  if (_hasSpotVolume && volumes.length >= 10) {
     const av = volumes.slice(-20).reduce((s, x) => s + x, 0) / Math.min(20, volumes.length);
     const cv = volumes[len - 1];
     if (av > 0) { const vr = cv / av; if (vr > 1.5 && closes[len - 1] > closes[len - 2]) vb += 0.4; else if (vr > 1.5) vb -= 0.4; }
     const vw = VWAP(highs, lows, closes, volumes);
     if (vw) vb += ltp > vw ? 0.3 : -0.3;
   }
-  comp.volume = { bias: clamp(vb, -1, 1), weight: _hasVolume ? 10 : 0, unavailable: !_hasVolume };
+
+  // Cash instruments keep the real spot-volume score. Indices get MEASURED option
+  // volume that is deliberately NOT scored into direction: volume reports how much
+  // traded, never on which side (the feed carries no trade-side data), so turning a
+  // put/call volume ratio into a bullish or bearish vote would be inventing an edge
+  // that has not been validated. It is used instead as a liquidity gate (below) and
+  // reported to the UI, so the signal genuinely checks volume without pretending it
+  // predicts direction. Historical chain volume is not retained by the feed, so this
+  // cannot be backtested yet; once it is being logged, a scored version can be
+  // validated the same way the reversion factors were.
+  comp.volume = _hasSpotVolume
+    ? { bias: clamp(vb, -1, 1), weight: 10, available: true, source: 'spot' }
+    : {
+        bias: 0, weight: 0,
+        available: !!_optVol,
+        source: _optVol ? 'option-chain' : null,
+        note: _optVol
+          ? 'measured from the option chain (liquidity gate, not scored into direction)'
+          : 'no traded volume published for this index and no option chain available',
+        metrics: _optVol,
+      };
 
   // RSI fade (10): overbought => fade short, oversold => fade long (mean-reversion,
   // the inverse of the old momentum reading which bought RSI>60 strength).
@@ -639,6 +688,17 @@ export function generateSignal(snapshot, opts = {}) {
     dir = 'NO_TRADE';
   }
 
+  // Rule 11d: OPTION-CHAIN LIQUIDITY GATE (this is the volume check for indices).
+  // Only meaningful when the chain actually resolved — an absent chain is missing
+  // data, not evidence of illiquidity, and must never veto on its own.
+  // A contract with no reported volume at or next to the money cannot be exited at
+  // anything like the quoted price, so the setup is refused regardless of quality.
+  if (dir !== 'NO_TRADE' && _optVol && _optVol.atmTotal === 0) {
+    vetoes.push('NO_ATM_OPTION_VOLUME: the strikes at/next to the money (' + _optVol.atmStrike
+      + ') report zero traded volume. Nothing is changing hands there, so a fill — and more importantly an exit — is not realistic.');
+    dir = 'NO_TRADE';
+  }
+
   // Rule 12: PCR extreme — DISABLED as hard veto.
   // Reason: PCR data from GEX endpoint is unreliable (values like 78.54, 0.0, 224.8 seen today).
   // Instead, PCR is already factored into the Options component scoring (soft influence on confidence).
@@ -849,6 +909,10 @@ export function generateSignal(snapshot, opts = {}) {
       },
       risk: { riskPerLot: Math.round(atr * 1.2 * lot), rewardT1PerLot: Math.round(atr * lot), rr: 0.83 },
       strength: conf >= 90 ? 'VERY_STRONG' : conf >= 82 ? 'STRONG' : conf >= 75 ? 'MODERATE' : 'WEAK',
+      // Real traded volume for the instrument actually being bought. For indices the
+      // spot feed is always zero, so this comes from the option chain.
+      optionVolume: _optVol,
+      spotVolumeAvailable: _hasSpotVolume,
     },
     superTrend: st,
     verdict: `${dir === 'BUY' ? '📈 BUY' : '📉 SELL'} ${symbol} @ ₹${r2(ltp)} | Confidence ${conf.toFixed(0)}% | ${otype} ${atm} @ ₹${Math.round(prem)}`,
