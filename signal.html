@@ -66,12 +66,12 @@
     } catch (e) {}
   </script>
   <script type="module">
-    import { INSTRUMENTS, buildSnapshot, generateSignal, buildOptionTrade, expertAdvice, getCandles, EMA, fmt, inr } from './js/live-engine.js?v=4.0';
+    import { INSTRUMENTS, buildSnapshot, generateSignal, buildOptionTrade, expertAdvice, getCandles, EMA, fmt, inr } from './js/live-engine.js?v=4.1';
     import { godBrain } from './js/god-mode.js?v=2.5';
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
     startBuildCheck('2026-08-28-r15');
-    import { paperTrader } from './js/paper-trading.js?v=4.6';
+    import { paperTrader } from './js/paper-trading.js?v=4.7';
     import { virtualTrader } from './js/virtual-trading.js?v=1.0';
     const PROXY = '/signals/api/proxy.php';
     const MONTHS = { '01':'Jan','02':'Feb','03':'Mar','04':'Apr','05':'May','06':'Jun','07':'Jul','08':'Aug','09':'Sep','10':'Oct','11':'Nov','12':'Dec' };

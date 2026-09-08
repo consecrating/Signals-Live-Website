@@ -406,10 +406,20 @@ export function generateSignal(snapshot, opts = {}) {
   const opinions = Object.values(comp).filter(c => c.weight > 0 && Math.sign(c.bias) !== 0);
   const agree = opinions.length ? opinions.filter(c => Math.sign(c.bias) === dom).length / opinions.length : 0;
 
-  // Direction from the mean-reversion net. Threshold raised to ±22 (validated): it
-  // fires only on genuine extremes, keeping the signal count low so theta is not
-  // paid on marginal setups.
-  const MR_DIR_TH = 22;
+  // Direction from the mean-reversion net, inside a CONVICTION WINDOW.
+  //
+  // Measured on this engine's own signals (90 days, 4 indices, ADX>=25, 1-hour
+  // horizon), accuracy rises with stretch and then collapses at the extreme:
+  //     |net| 22-30 : 49.5% hit, -0.003% avg   <-- too shallow, no edge
+  //     |net| 30-40 : 51.8% hit, +0.011%
+  //     |net| 40-50 : 57.1% hit, +0.023%       <-- the sweet spot
+  //     |net| >= 50 : 52.7% hit, -0.034%       <-- breakout, not over-extension
+  // The floor is therefore 30 (shallow pullbacks are noise) and there is now an
+  // upper bound: past ~50 the move is not stretched, it is RE-PRICING, and fading a
+  // genuine regime break is how a fade strategy takes its largest losses. The upper
+  // bound is applied as a veto below so the UI can explain the refusal.
+  const MR_DIR_TH = 30;
+  const MR_EXTREME = 50;
   let dir = net > MR_DIR_TH ? 'BUY' : net < -MR_DIR_TH ? 'SELL' : 'NO_TRADE';
   let conf = Math.min(99, Math.abs(net) * 0.62 + agree * 42);
   let veto = null;
@@ -597,6 +607,38 @@ export function generateSignal(snapshot, opts = {}) {
     }
   }
 
+  // Rule 11b: MEAN-REVERSION REGIME GATE — measured, not assumed.
+  //
+  // Fading only pays once a move has enough directional energy to over-extend. A
+  // 90-day, 4-index study of THIS engine's own signals (n=2,588 at conf>=60,
+  // 1-hour horizon) shows the low-trend bands are where fades bleed:
+  //     ADX < 18   : 32.1% hit, -0.051% average return   <-- worst
+  //     ADX 18-25  : 47.5% hit, -0.032% average return
+  //     ADX 25-32  : 52.7% hit, +0.001%
+  //     ADX 32-40  : 50.9% hit, -0.001%
+  //     ADX 40-48  : 49.7% hit, +0.002%
+  //     ADX >= 48  : 67.7% hit, +0.061%                  <-- best
+  // Both sub-25 bands carry negative expectancy, so directionless drift is no longer
+  // traded. This also corrects the intuition previously written into the playbook
+  // text, which claimed chop was the BEST regime for reversion — the data says it is
+  // the worst, because in chop there is no over-extension to revert.
+  if (dir !== 'NO_TRADE' && adx != null && adx < 25) {
+    vetoes.push('WEAK_TREND_NO_FADE: ADX ' + Math.round(adx) + ' (<25) — no directional energy to over-extend, '
+      + 'so there is nothing stretched to fade. Measured expectancy in this band is negative.');
+    dir = 'NO_TRADE';
+  }
+
+  // Rule 11c: EXTREME STRETCH = RE-PRICING, NOT OVER-EXTENSION.
+  // Past |net| ~50 the measured edge inverts (52.7% hit but -0.034% average return):
+  // the market is not over-extended, it is repricing, and a fade in front of that is
+  // the classic falling knife. Refuse rather than size down.
+  if (dir !== 'NO_TRADE' && Math.abs(net) >= MR_EXTREME) {
+    vetoes.push('EXTREME_STRETCH_NO_FADE: reversion score ' + Math.round(net) + ' is beyond the fade window (±'
+      + MR_EXTREME + '). A move this far outside its mean is usually genuine re-pricing, not exhaustion — '
+      + 'measured expectancy here is negative. Waiting for it to stabilise.');
+    dir = 'NO_TRADE';
+  }
+
   // Rule 12: PCR extreme — DISABLED as hard veto.
   // Reason: PCR data from GEX endpoint is unreliable (values like 78.54, 0.0, 224.8 seen today).
   // Instead, PCR is already factored into the Options component scoring (soft influence on confidence).
@@ -690,7 +732,11 @@ export function generateSignal(snapshot, opts = {}) {
   // Base hit-rate estimate by regime. Mean-reversion works BEST in chop and worst
   // in a strong trend — the inverse of the old momentum assumption (validated ~55%
   // aggregate; see the MEAN-REVERSION CORE note above).
-  const winRate = clamp(Math.round((regime === 'Trending' ? 46 : regime === 'Developing' ? 52 : 56) + (conf - 60) * 0.3), 25, 78);
+  // Base hit-rate estimate by regime, taken from the measured ADX bands above
+  // (n=2,588, 1-hour horizon) rather than intuition. Trending (ADX>=25) is where
+  // fades actually work; sub-25 bands are negative expectancy and are now vetoed
+  // outright, so their numbers here are only ever shown on a blocked signal.
+  const winRate = clamp(Math.round((regime === 'Trending' ? 53 : regime === 'Developing' ? 47 : 32) + (conf - 60) * 0.3), 25, 78);
   const strategy = {
     regime,
     adx: adx != null ? Math.round(adx) : null,
@@ -700,14 +746,14 @@ export function generateSignal(snapshot, opts = {}) {
     orb, swing, winRate, gex,
     approach: 'mean-reversion',
     playbook: regime === 'Trending'
-      ? 'Strong trend (ADX≥25): the riskier regime for a fade — only fade a genuine over-extension (stretched >2 ATR from the mean, RSI/Bollinger extreme), book T1 fast and size down.'
+      ? 'Trending (ADX≥25): the only regime this engine fades, because a real trend is what produces a real over-extension. Fade the stretch (>2 ATR from the 21-EMA, RSI/Bollinger extreme) back toward the mean, book T1 fast and trail the rest. Measured ~53% at the 1-hour horizon.'
       : regime === 'Developing'
-      ? 'Trend developing (ADX 18-25): fade stretched moves back toward the 20-EMA/VWAP; book T1 quickly and trail the remainder.'
-      : 'Choppy/range (ADX<18): prime mean-reversion conditions — fade the extremes at the range edges / Bollinger bands back toward the mean. Strongest edge here.'
+      ? 'Developing (ADX 18-25): below this engine\'s fade threshold — measured expectancy is negative (~47% hit, negative average return), so signals here are blocked rather than traded.'
+      : 'Choppy/range (ADX<18): NOT a fade regime, despite the intuition. With no trend there is no over-extension to revert, and this is the worst measured band (~32% hit). Signals here are blocked; wait for ADX to rise above 25.'
   };
   if (gex) {
     strategy.gexNote = gex.regime === 'Negative Gamma'
-      ? `Dealers are SHORT gamma (net GEX ${gex.netGEX}) — they hedge WITH the move, AMPLIFYING volatility. Favor momentum/breakout trades and let winners run toward the walls. Upside magnet (call wall) ${gex.callWall}, downside support (put wall) ${gex.putWall}, zero-gamma flip ${gex.flip}.`
+      ? `Dealers are SHORT gamma (net GEX ${gex.netGEX}) — they hedge WITH the move, AMPLIFYING volatility. This is the HOSTILE regime for a fade: an over-extension can extend further before it reverts, so demand a bigger stretch, keep the stop tight and take T1 quickly. Downside can run to the put wall ${gex.putWall}, upside to the call wall ${gex.callWall}; zero-gamma flip ${gex.flip}.`
       : `Dealers are LONG gamma (net GEX ${gex.netGEX}) — they hedge AGAINST the move, SUPPRESSING volatility (range day). Fade extremes back toward the flip ${gex.flip}; avoid chasing breakouts. Call wall ${gex.callWall} = resistance, put wall ${gex.putWall} = support.`;
   } else if (_gexIgnoredNote) {
     strategy.gexNote = _gexIgnoredNote;

@@ -239,14 +239,26 @@ function kReconcile($audit = true) {
                        'detail' => 'No paper state file; cannot know open exposure.'];
         $state = [];
     }
+    // Open positions have already had their cost DEDUCTED from state capital
+    // (paper-trading.js: `s.capital -= cost` on open, `s.capital += cost + pnl` on
+    // close). The replay only knows realised P&L, so capital must be compared as
+    // cash + open exposure — otherwise every open position produced a false
+    // CAPITAL_DRIFT equal to its own cost, which is exactly what the dashboard was
+    // reporting ("run the recovery cycle") while nothing was actually wrong.
+    $openExposure = 0.0;
+    foreach ((is_array($state['active'] ?? null) ? $state['active'] : []) as $p) {
+        $openExposure += (float)($p['cost'] ?? 0);
+    }
+    $openExposure = round($openExposure, 2);
+
     if (!isset($state['capital'])) {
         $findings[] = ['code' => 'CAPITAL_ABSENT', 'severity' => 'critical',
                        'detail' => 'State has no capital field (state file was replaced or truncated).'];
     } else {
-        $drift = round(((float)$state['capital']) - $truth['expectedCapital'], 2);
+        $drift = round(((float)$state['capital']) + $openExposure - $truth['expectedCapital'], 2);
         if (abs($drift) > 1.0) {
             $findings[] = ['code' => 'CAPITAL_DRIFT', 'severity' => 'critical',
-                'detail' => "Recorded capital {$state['capital']} != replay {$truth['expectedCapital']} (drift {$drift})",
+                'detail' => "Recorded capital {$state['capital']} + open exposure {$openExposure} != replay {$truth['expectedCapital']} (drift {$drift})",
                 'drift' => $drift];
         }
     }
@@ -292,9 +304,21 @@ function kRecover() {
 
     $state['initialCapital'] = PAPER_INITIAL_CAPITAL;
     $state['maxPerTrade']    = PAPER_MAX_PER_TRADE;
-    $state['capital']        = $truth['expectedCapital'];
+    // Rebuild CASH, not total equity: the cost of still-open positions has already
+    // been deducted from capital and is returned by _closePosition when they close.
+    // Assigning the raw replay figure here handed that cash back while the position
+    // was still open, so closing it credited `cost + pnl` a second time and inflated
+    // the ledger on every recovery cycle run with a position open.
+    $openExposureR = 0.0;
+    foreach ((is_array($state['active'] ?? null) ? $state['active'] : []) as $p) {
+        $openExposureR += (float)($p['cost'] ?? 0);
+    }
+    $openExposureR = round($openExposureR, 2);
+    $state['capital']        = round($truth['expectedCapital'] - $openExposureR, 2);
     $state['totalPnl']       = $truth['realisedPnl'];
-    $actions[] = 'Rebuilt capital and realised P&L by replaying trades.jsonl';
+    $actions[] = $openExposureR > 0
+        ? 'Rebuilt cash and realised P&L by replaying trades.jsonl (held back ' . $openExposureR . ' of open exposure)'
+        : 'Rebuilt capital and realised P&L by replaying trades.jsonl';
 
     if (!isset($state['peakCapital']) || $state['peakCapital'] < PAPER_INITIAL_CAPITAL) {
         $state['peakCapital'] = max(PAPER_INITIAL_CAPITAL, $truth['expectedCapital']);

@@ -774,6 +774,31 @@ export class PaperTradingEngine {
     // DEDUP: Never enter same instrument+direction if already active
     const alreadyIn = s.active.find(p => p.instrument === signal.symbol && p.direction === signal.direction);
     if (alreadyIn) return finish({ executed: false, reason: `Already have ${signal.direction} position on ${signal.symbol}` });
+
+    // ── CORRELATED EXPOSURE GUARD ──────────────────────────────────────────────
+    // The Indian index F&O universe is one trade wearing four names: NIFTY,
+    // BANKNIFTY, FINNIFTY and MIDCPNIFTY all track the same domestic equity beta
+    // and sell off together. The per-instrument dedup above only stopped a repeat of
+    // the SAME symbol, so on a broad move the engine could fill all three position
+    // slots with the same directional bet — e.g. on 2026-09-08 it produced BUY CE on
+    // NIFTY, BANKNIFTY and FINNIFTY simultaneously during a market-wide decline.
+    // That is not three ideas diversifying each other, it is one idea at 3x size,
+    // and it is how a single wrong read empties the book.
+    //
+    // Cap same-direction exposure across the correlated basket at 2 concurrent
+    // positions. Opposite-direction positions are unaffected (they hedge), and a
+    // non-index underlying is not counted against the basket.
+    const CORRELATED_BASKET = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'];
+    const MAX_CORRELATED_SAME_DIR = 2;
+    if (CORRELATED_BASKET.includes(signal.symbol)) {
+      const sameDirBasket = s.active.filter(p => p.direction === signal.direction
+        && CORRELATED_BASKET.includes(p.instrument));
+      if (sameDirBasket.length >= MAX_CORRELATED_SAME_DIR) {
+        return finish({ executed: false, reason: `Correlated exposure cap: already ${sameDirBasket.length} `
+          + `${signal.direction} position(s) on correlated indices (${sameDirBasket.map(p => p.instrument).join(', ')}). `
+          + `These move together — adding ${signal.symbol} would concentrate one bet, not diversify.` });
+      }
+    }
     // DEDUP: Don't re-enter same instrument within 10 minutes of last trade
     const lastTrade = s.trades.filter(t => t.instrument === signal.symbol).slice(-1)[0];
     if (lastTrade && lastTrade.exitDate) {
