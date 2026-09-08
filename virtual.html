@@ -61,8 +61,8 @@
 
   <main class="page-container">
     <div class="vt-header">
-      <h1>⚡ Virtual Trading <span class="vt-badge">Manual · ₹1,00,000</span></h1>
-      <div class="sub">You place every buy and sell by hand on live option prices. Attach a stop/target, trail, or schedule an exit. Every closed trade is journaled and fed to the God Mode brain. <strong>To open a new trade, go to <a href="signal.html" style="color:#c4b5fd">Signals</a> and press “⚡ Virtual Trade”.</strong></div>
+      <h1>⚡ Virtual Trading <span class="vt-badge">Manual · Intraday · ₹1,00,000</span></h1>
+      <div class="sub">You place every buy and sell by hand on live option prices. Attach a stop/target, trail, or schedule an exit. Every closed trade is journaled and fed to the God Mode brain. <strong>Intraday only — any position still open is squared off automatically at 15:20 IST; nothing is carried overnight.</strong> <strong>To open a new trade, go to <a href="signal.html" style="color:#c4b5fd">Signals</a> and press “⚡ Virtual Trade”.</strong></div>
     </div>
 
     <div class="vt-stats" id="vt-stats"></div>
@@ -92,11 +92,11 @@
     <div class="section-title">📝 Journal</div>
     <div id="journal"></div>
 
-    <p class="text-xs muted" style="margin-top:1.5rem">Virtual desk v<span id="vt-ver">?</span> · Simulated fills execute at the live premium · Scheduled &amp; bracket exits require this tab (or Signals) to stay open, since evaluation runs in the browser.</p>
+    <p class="text-xs muted" style="margin-top:1.5rem">Virtual desk v<span id="vt-ver">?</span> · Simulated fills execute at the live premium · <strong>Intraday: all open positions are auto-squared-off at 15:20 IST</strong> · Bracket &amp; scheduled exits need this tab (or Signals) open, since evaluation runs in the browser — if it was closed at 15:20, any leftover position is squared off on the last marked price as soon as a tab is opened again.</p>
   </main>
 
   <script type="module">
-    import { virtualTrader, VT_VERSION, isMarketOpen } from './js/virtual-trading.js?v=1.0';
+    import { virtualTrader, VT_VERSION, isMarketOpen } from './js/virtual-trading.js?v=1.1';
     import { primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
     startBuildCheck('2026-08-28-r15');

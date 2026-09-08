@@ -3,8 +3,10 @@
  * VIRTUAL TRADING DESK — manual, human-operated (₹1,00,000)
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- * A SEPARATE ledger from the automated paper trader (js/paper-trading.js). Here
- * YOU decide every entry and exit:
+ * A SEPARATE ledger from the automated paper trader (js/paper-trading.js). This desk
+ * is INTRADAY — every open position is squared off at 15:20 IST and nothing is ever
+ * carried overnight (see eodSquareOffDue + monitor). Here YOU decide every entry and
+ * discretionary exit:
  *   • Manually BUY the current signal's exact live option contract.
  *   • Manually SELL — full or partial (25/50/100%).
  *   • Attach a bracket at entry: hard stop-loss + target (auto-exit when hit).
@@ -54,6 +56,44 @@ function slippage(premium) {
 function istNow() {
   const i = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
   return { date: i, min: i.getHours() * 60 + i.getMinutes(), day: i.getDay() };
+}
+
+/**
+ * ── INTRADAY SQUARE-OFF ────────────────────────────────────────────────────────
+ * This desk is INTRADAY: nothing is carried overnight. Every open position is sold
+ * at the end of the session, matching the paper desk's 15:20 IST forced close.
+ *
+ * 15:20 (not 15:30) deliberately — the last ten minutes are the thinnest part of
+ * the option book, so squaring off there models a fill you could actually get.
+ */
+const EOD_SQUAREOFF_MIN = 15 * 60 + 20; // 15:20 IST
+const MARKET_CLOSE_MIN  = 15 * 60 + 30; // 15:30 IST
+
+/** IST calendar day of a timestamp, as YYYY-MM-DD, for same-session comparisons. */
+function istDayKey(dateLike) {
+  const d = dateLike ? new Date(dateLike) : new Date();
+  if (isNaN(d.getTime())) return null;
+  const i = new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  return i.getFullYear() + '-' + String(i.getMonth() + 1).padStart(2, '0') + '-' + String(i.getDate()).padStart(2, '0');
+}
+
+/**
+ * Should this position be squared off now purely on the clock?
+ * Returns an outcome label, or null to leave it open.
+ *
+ * Two distinct cases, because evaluation only runs while a browser tab is open:
+ *  1. SAME SESSION, past 15:20 — the normal intraday close.
+ *  2. AN EARLIER SESSION — the tab was shut before 15:20 (or over a weekend), so
+ *     the position was never squared off and is now stale. It must not keep running
+ *     as if it were live; close it on the last price we have.
+ */
+function eodSquareOffDue(pos) {
+  const now = istNow();
+  const todayKey = istDayKey();
+  const openKey = istDayKey(pos && pos.openDate);
+  if (openKey && openKey !== todayKey) return 'EOD_SQUAREOFF_STALE';
+  if (now.min >= EOD_SQUAREOFF_MIN) return 'EOD_SQUAREOFF';
+  return null;
 }
 export function isMarketOpen() {
   const { min, day } = istNow();
@@ -164,6 +204,13 @@ export class VirtualTradingEngine {
     const entryRaw = Number(trade.livePremium) || Number(trade.entryPremium) || 0;
     if (!(entryRaw > 0)) throw new Error('No positive entry premium available for this contract.');
     const live = trade.premiumSource === 'live';
+
+    // Intraday desk: refuse an entry that the 15:20 square-off would close within
+    // minutes. Opening here only pays the spread for no time in the trade.
+    const _tNow = istNow();
+    if (_tNow.day >= 1 && _tNow.day <= 5 && _tNow.min >= EOD_SQUAREOFF_MIN - 5 && _tNow.min < MARKET_CLOSE_MIN + 1) {
+      throw new Error('Too late in the session — this desk squares off all positions at 15:20 IST, so a new intraday entry is blocked after 15:15.');
+    }
 
     const slip = slippage(entryRaw);
     const effectiveEntry = _round2(entryRaw + slip.entry);
@@ -354,14 +401,34 @@ export class VirtualTradingEngine {
     let changed = false, closed = 0;
     for (const pos of actives) {
       const q = await this.requote(pos);
+      if (q) {
+        pos.currentPremium = q.ltp; pos.lastQuoteAt = q.quoteAt;
+        if (q.ltp > (pos.peakPremium || 0)) pos.peakPremium = q.ltp;
+        pos.pnl = _round2((q.ltp - pos.effectiveEntry) * pos.qty);
+        pos.pnlPct = pos.effectiveEntry > 0 ? Math.round((q.ltp - pos.effectiveEntry) / pos.effectiveEntry * 100) : 0;
+        changed = true;
+      }
+
+      // ── INTRADAY SQUARE-OFF (checked BEFORE the freshness gate) ──────────────
+      // This is deliberately evaluated even without a fresh quote. After 15:30 the
+      // option feed stops ticking, so requiring freshness here would mean the
+      // end-of-day exit could never fill and the position would silently ride
+      // overnight — which is what left holds of 700+ and 2,100+ minutes on the
+      // paper book. The desk is intraday, so the clock closes the trade and we fill
+      // on the best price available: a fresh quote if there is one, otherwise the
+      // last premium we marked.
+      const due = eodSquareOffDue(pos);
+      if (due) {
+        const px = (q && Number(q.ltp) > 0) ? q.ltp
+                 : (Number(pos.currentPremium) > 0 ? Number(pos.currentPremium) : pos.effectiveEntry);
+        this._sellInternal(pos, px, 100, due);
+        closed++;
+        continue;
+      }
+
       if (!q) continue;
+      // Bracket/schedule exits DO require a fresh quote to fill against.
       const fresh = q.quoteAt && (Date.now() - q.quoteAt) <= 120000;
-      pos.currentPremium = q.ltp; pos.lastQuoteAt = q.quoteAt;
-      if (q.ltp > (pos.peakPremium || 0)) pos.peakPremium = q.ltp;
-      pos.pnl = _round2((q.ltp - pos.effectiveEntry) * pos.qty);
-      pos.pnlPct = pos.effectiveEntry > 0 ? Math.round((q.ltp - pos.effectiveEntry) / pos.effectiveEntry * 100) : 0;
-      changed = true;
-      // Auto-exit triggers require a FRESH quote to fill against.
       if (!fresh) continue;
       const trigger = this._evaluateTriggers(pos, q.ltp);
       if (trigger) {
@@ -379,7 +446,7 @@ export class VirtualTradingEngine {
     // long-open tab hit 409 "reload; retry". `changed` is retained for the return.
     void changed;
     if (closed) {
-      try { await this._persist({ action: 'AUTO_EXIT', reason: 'Bracket/schedule fills', count: closed }); }
+      try { await this._persist({ action: 'AUTO_EXIT', reason: 'Bracket/schedule/end-of-day fills', count: closed }); }
       catch (e) { /* 409 handled by hydrate; positions re-evaluated next tick */ }
     }
     return { marked: actives.length, closed };
