@@ -1,0 +1,30 @@
+{
+  "_comment": "Last offline option-premium validation run. Produced by SignalsBrain: python -m brain.validation.runner --symbols BANKNIFTY NIFTY FINNIFTY MIDCPNIFTY --days 30 --trials 12. Read by god-dashboard.html. Regenerate after any engine change; a stale file is worse than none, so the dashboard shows its age.",
+  "generatedAt": "2026-09-08T14:45:00+05:30",
+  "engineBuild": "2026-09-08-mr-v2",
+  "approach": "mean-reversion",
+  "window": { "days": 30, "interval": "FIFTEEN_MINUTE", "horizon": "stop/target/15:20 square-off" },
+  "trialsCorrectedFor": 12,
+  "pooled": {
+    "trades": 40,
+    "winRate": 67.5,
+    "expectancyPct": 1.98,
+    "profitFactor": 1.61,
+    "sharpe": 3.48,
+    "psr": 0.86,
+    "deflatedSharpe": 0.55,
+    "verdict": "NOT DISTINGUISHABLE FROM LUCK — deflated Sharpe 0.55 (want > 0.95). Positive expectancy but well within noise on only 40 trades."
+  },
+  "bySymbol": [
+    { "symbol": "MIDCPNIFTY", "trades": 13, "winRate": 76.9, "expectancyPct": 4.22, "profitFactor": 5.56, "pValue": 0.013, "deflatedSharpe": 0.74, "note": "strongest; CPCV 15/15 paths profitable" },
+    { "symbol": "FINNIFTY",   "trades": 10, "winRate": 70.0, "expectancyPct": 3.16, "profitFactor": 3.04, "pValue": 0.144, "deflatedSharpe": 0.44, "note": "positive but not significant" },
+    { "symbol": "BANKNIFTY",  "trades": 9,  "winRate": 66.7, "expectancyPct": 1.83, "profitFactor": 1.94, "pValue": 0.336, "deflatedSharpe": 0.27, "note": "positive but not significant" },
+    { "symbol": "NIFTY",      "trades": 8,  "winRate": 50.0, "expectancyPct": -3.23, "profitFactor": 0.70, "pValue": 0.670, "deflatedSharpe": 0.02, "note": "LOSES money on options despite a 51.4% spot hit rate — theta" }
+  ],
+  "limitations": [
+    "All trades priced against one expiry, so signals older than that contract's life understate theta. Results are an OPTIMISTIC bound, not a neutral estimate.",
+    "Some signals could not be priced at all (FINNIFTY 25, MIDCPNIFTY 47 skipped) which shrinks the sample further.",
+    "40 trades cannot separate skill from luck. Do not size up on this.",
+    "Option-chain volume has no history, so it is measured as a liquidity gate only and is not scored into direction."
+  ]
+}

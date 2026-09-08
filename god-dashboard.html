@@ -139,7 +139,7 @@
       <h3><span>Market Intelligence</span><span class="muted" id="mi-breadth"></span></h3>
       <div style="overflow-x:auto">
         <table class="gm" id="mi-tbl">
-          <thead><tr><th>Index</th><th>LTP</th><th>Chg%</th><th>EMA 9/21</th><th>ADX</th><th>Regime</th><th>ATR</th><th>Vol%</th><th>Dealer γ</th></tr></thead>
+          <thead><tr><th>Index</th><th>LTP</th><th>Chg%</th><th>Short-TF trend</th><th>ADX</th><th>Fade regime</th><th>ATR</th><th>Vol%</th><th>Dealer γ</th></tr></thead>
           <tbody><tr><td colspan="9" class="muted">Loading live data…</td></tr></tbody>
         </table>
       </div>
@@ -193,6 +193,30 @@
         <div id="pf-pos" style="margin-top:0.5rem"></div>
       </section>
 
+      <!-- ══ 6b. STRATEGY VALIDATION ══
+           This page authorises execution, so it must also show whether the strategy is
+           PROVEN — not merely whether the plumbing is healthy. Live desk statistics on
+           the left, the last offline option-premium backtest on the right. -->
+      <section class="gm-card" data-panel="validation" data-title="Strategy Validation"
+               style="border-color:rgba(96,165,250,0.35)">
+        <h3><span>Strategy Validation</span><span class="muted" id="vd-src"></span></h3>
+        <div class="gm-grid gm-2">
+          <div>
+            <div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">LIVE PAPER BOOK (realised)</div>
+            <div class="kv"><span class="k">Closed trades</span><span class="v" id="vd-n">…</span></div>
+            <div class="kv"><span class="k">Expectancy / trade</span><span class="v" id="vd-exp">…</span></div>
+            <div class="kv"><span class="k">Profit factor</span><span class="v" id="vd-pf">…</span></div>
+            <div class="kv"><span class="k">Sharpe / Sortino</span><span class="v" id="vd-sharpe">…</span></div>
+            <div class="kv"><span class="k">Significance</span><span class="v" id="vd-sig">…</span></div>
+            <div id="vd-verdict" style="margin-top:0.5rem"></div>
+          </div>
+          <div>
+            <div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">OFFLINE BACKTEST — REAL OPTION PREMIUMS (theta included)</div>
+            <div id="vd-offline" class="muted">Loading…</div>
+          </div>
+        </div>
+      </section>
+
       <!-- ══ 6. SKILL REGISTRY ══ -->
       <section class="gm-card" data-panel="skills" data-title="Skill Registry">
         <h3><span>Skill Registry</span><span class="muted" id="sk-count"></span></h3>
@@ -237,9 +261,10 @@
     import { INSTRUMENTS, getCandles, generateSignal, buildSnapshot, ADX, ATR, RSI, EMA,
              bsDelta, fmt, inr } from './js/live-engine.js?v=4.2';
     import { godBrain } from './js/god-mode.js?v=2.4';
+    import { summarize as riskSummarize, returnsFromTrades } from './js/core/risk-metrics.js?v=1.0';
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
-    startBuildCheck('2026-08-28-r15');
+    startBuildCheck('2026-08-28-r15'); // must match ?action=build on the server
 
     // Evict keys written by older builds; all state is server-owned now.
     try {
@@ -261,7 +286,29 @@
     // is asked only to interpret them. That is both cheaper and not guessable.
     const CTX = { panel: 'market', panelTitle: 'Market Overview', instrument: 'NIFTY',
                   safety: null, integrity: null, market: [], chain: null, trade: null,
-                  portfolio: null, skills: null, audit: null, updatedAt: null };
+                  portfolio: null, skills: null, audit: null, validation: null,
+                  // The copilot could not previously see the strategy's own identity or
+                  // its statistical standing, so "is this setup safe to take?" was
+                  // answered without knowing the engine fades extremes or that the
+                  // track record is inconclusive. Both are now part of every prompt.
+                  strategy: {
+                    approach: 'mean-reversion',
+                    thesis: 'Fades stretched extremes back toward the mean. BUY = fade an oversold dip '
+                          + '(long CE); SELL = fade an overbought rip (long PE). It trades AGAINST the '
+                          + 'short-term trend by design, so a contrary 1H bias is expected, not a contradiction.',
+                    gates: {
+                      convictionWindow: 'reversion score must be between ±30 and ±50',
+                      regime: 'ADX >= 25 required; sub-25 bands measured negative expectancy',
+                      extreme: '|score| >= 50 refused — that is re-pricing, not over-extension',
+                      atmVolume: 'refused if at-the-money strikes report zero traded volume',
+                      correlation: 'max 2 same-direction positions across NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY',
+                      intraday: 'all positions squared off at 15:20 IST; nothing held overnight',
+                    },
+                    volumeNote: 'Index spot volume does not exist (NSE publishes none). Option-chain volume '
+                              + 'is measured as a liquidity gate but deliberately NOT scored into direction, '
+                              + 'because volume shows how much traded and never on which side.',
+                  },
+                  updatedAt: null };
 
     (function ms(){ const i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
       const d=i.getDay(),t=i.getHours()*60+i.getMinutes(); const e=$('mkt-t'),b=$('mkt');
@@ -381,22 +428,33 @@
       const up = rows.filter(r => !r.dead && r.chg > 0).length;
       const tot = rows.filter(r => !r.dead).length;
       const live = rows.find(r => !r.dead);
-      $('mi-breadth').textContent = tot
-        ? `breadth ${up}/${tot} advancing · Chg% ${live?.chgBasis || ''}${live?.sessionDate ? ' (' + live.sessionDate + ')' : ''} · EMA 9/21 is short-term structure, not the session direction`
+      // The engine FADES stretched moves, so this table must not be read as a
+      // trend-following scoreboard. A green "Short-TF trend UP" is the thing a SELL
+      // signal is deliberately betting against; and "Trending" (ADX>=25) is the only
+      // regime in which fades are permitted at all, because sub-25 bands measured
+      // negative expectancy. Previously this row implied the opposite on both counts.
+      $('mi-breadth').innerHTML = tot
+        ? `breadth ${up}/${tot} advancing · Chg% ${live?.chgBasis || ''}${live?.sessionDate ? ' (' + live.sessionDate + ')' : ''}`
+          + ` · <span class="text-amber">engine is MEAN-REVERSION: it fades the short-TF trend, so these columns are what is being traded AGAINST</span>`
         : '';
-      $('mi-tbl').querySelector('tbody').innerHTML = rows.map(r => r.dead
-        ? `<tr><td>${r.sym}</td><td colspan="8" class="muted">no data</td></tr>`
-        : `<tr>
+      const fadeOk = (adx) => adx == null ? ['—', ''] :
+        adx >= 25 ? ['tradeable', 'text-green'] : ['blocked <25', 'text-red'];
+      $('mi-tbl').querySelector('tbody').innerHTML = rows.map(r => {
+        if (r.dead) return `<tr><td>${r.sym}</td><td colspan="8" class="muted">no data</td></tr>`;
+        const [fadeTxt, fadeCls] = fadeOk(r.adx);
+        return `<tr>
              <td><b>${r.sym}</b></td>
              <td>${fmt(r.ltp,1)}</td>
              <td class="${r.chg>=0?'text-green':'text-red'}">${r.chg>=0?'+':''}${r.chg.toFixed(2)}%</td>
-             <td class="${r.trend==='UP'?'text-green':'text-red'}">${r.trend}</td>
+             <td class="${r.trend==='UP'?'text-green':'text-red'}">${r.trend} <span class="muted" style="font-size:0.85em">(faded)</span></td>
              <td>${r.adx!=null?r.adx.toFixed(0):'—'}</td>
-             <td>${r.regime}</td>
+             <td class="${fadeCls}">${r.regime} · ${fadeTxt}</td>
              <td>${r.atr?fmt(r.atr,1):'—'}</td>
              <td>${r.volPct!=null?r.volPct.toFixed(2)+'%':'—'}</td>
-             <td class="${r.gex==='Negative Gamma'?'text-green':r.gex==='Positive Gamma'?'text-red':''}">${r.gex||'—'}</td>
-           </tr>`).join('');
+             <td class="${r.gex==='Negative Gamma'?'text-red':r.gex==='Positive Gamma'?'text-green':''}"
+                 title="${r.gex==='Negative Gamma'?'Dealers amplify moves — hostile for a fade':'Dealers suppress moves — helpful for a fade'}">${r.gex||'—'}</td>
+           </tr>`;
+      }).join('');
     }
 
     // ═══ 3. OPTION CHAIN ══════════════════════════════════════════════════════
@@ -480,6 +538,16 @@
       const t = sig.optionTrade || sig.watchTrade;
       const dirCol = sig.direction==='BUY'?'text-green':sig.direction==='SELL'?'text-red':'muted';
       let h = `<div class="kv"><span class="k">Setup</span><span class="v ${dirCol}">${sig.direction} · ${sig.confidence}% confidence</span></div>`;
+      // State the thesis explicitly. A BUY here is "fade the oversold dip", not "join
+      // the uptrend" — without that line the direction beside a bearish 1H reads as a
+      // contradiction rather than the intended trade.
+      const fadeThesis = sig.netScore > 0
+        ? 'BUY = fade an oversold dip (long CE), expecting reversion up toward the mean'
+        : sig.netScore < 0
+          ? 'SELL = fade an overbought rip (long PE), expecting reversion down toward the mean'
+          : 'no stretch to fade';
+      h += `<div class="kv"><span class="k">Approach</span><span class="v text-amber" style="font-weight:500;text-align:right;max-width:65%">mean-reversion · ${fadeThesis}</span></div>`;
+      h += `<div class="kv"><span class="k">Reversion score</span><span class="v">${sig.netScore} <span class="muted">(fade window ±30 to ±50)</span></span></div>`;
       h += `<div class="kv"><span class="k">Regime / ADX / 1H bias</span><span class="v">${sig.strategy?.regime||'—'} · ${sig.strategy?.adx??'—'} · ${sig.strategy?.mtf||'—'}</span></div>`;
       if (t) {
         h += `<div class="kv"><span class="k">Contract</span><span class="v">${t.strike} ${t.type}${t.expiryDisplay?' · '+t.expiryDisplay:''}</span></div>`;
@@ -512,7 +580,25 @@
         if (gm.dailyLimit) blockers.push(['high', 'Daily signal limit reached.']);
         if (gm.timeExit?.exit) blockers.push(['high', `Time-based exit active: ${gm.timeExit.reason || 'late session'}.`]);
       }
-      for (const v of (sig.vetoes || [])) blockers.push(['high', v]);
+      // Annotate the mean-reversion gates with the measurement behind them. A bare
+      // code like WEAK_TREND_NO_FADE tells you a rule fired but not why the rule
+      // exists, which is the difference between a useful control plane and a log dump.
+      const GATE_RATIONALE = {
+        WEAK_TREND_NO_FADE:
+          'Measured: ADX&lt;18 scored 32% hit / −0.051% avg return and ADX 18-25 scored 47% / −0.032% '
+          + 'across 2,588 signals. With no trend there is no over-extension to revert, so fades below ADX 25 are refused.',
+        EXTREME_STRETCH_NO_FADE:
+          'Measured: |score|≥50 scored 52.7% hit but −0.034% avg return. Past that point the market is '
+          + 're-pricing rather than over-extended, and fading it is the falling-knife case.',
+        NO_ATM_OPTION_VOLUME:
+          'The at-the-money strikes report zero traded volume. You cannot exit at the quoted price what '
+          + 'nobody is trading — this is the volume check for indices, whose spot feed publishes none.',
+      };
+      for (const v of (sig.vetoes || [])) {
+        const code = String(v).split(':')[0].trim();
+        const why = GATE_RATIONALE[code];
+        blockers.push(['high', why ? `${v}<div class="muted" style="margin-top:0.2rem">${why}</div>` : v]);
+      }
       if (sig.direction === 'NO_TRADE' && !blockers.length) {
         blockers.push(['high', `Raw engine score ${sig.netScore} is inside the neutral band — no directional edge to act on.`]);
       }
@@ -598,6 +684,82 @@
         : '<div class="muted">No open positions.</div>';
     }
 
+    // ═══ 6b. STRATEGY VALIDATION ══════════════════════════════════════════════
+    // Live realised statistics + the last offline option-premium backtest.
+    //
+    // The point of putting this on the control plane: "EXECUTION PERMITTED" only means
+    // the plumbing is healthy. It says nothing about whether the strategy works, and a
+    // dashboard that shows a green safety badge beside a P&L number invites exactly the
+    // wrong inference. Both halves are shown with their sample size attached.
+    async function loadValidation() {
+      // ── live paper book ──
+      const st = await j(PROXY + '?action=paper_state' + bust());
+      const trades = (st?.state?.trades) || [];
+      const rets = returnsFromTrades(trades);
+      const startMs = st?.state?.startDate ? new Date(st.state.startDate).getTime() : Date.now();
+      const days = Math.max(1, (Date.now() - startMs) / 86400000);
+      const rk = riskSummarize(rets, Math.max(1, Math.round((rets.length / days) * 252)));
+      const inf = (v) => (v === Infinity ? '∞' : (v == null ? '—' : v));
+
+      $('vd-n').textContent = rk.n || 0;
+      $('vd-exp').innerHTML = rk.n
+        ? `<span class="${rk.expectancyPct > 0 ? 'text-green' : 'text-red'}">${rk.expectancyPct > 0 ? '+' : ''}${rk.expectancyPct}%</span>`
+        : '—';
+      $('vd-pf').textContent = rk.n ? inf(rk.profitFactor) : '—';
+      $('vd-sharpe').textContent = rk.n ? `${inf(rk.sharpe)} / ${inf(rk.sortino)}` : '— / —';
+      $('vd-sig').textContent = rk.n >= 2 ? `t=${rk.tStat}, p=${rk.pValue}` : '—';
+
+      const vpal = { supported: ['#065f46', '#6ee7b7'], unproven: ['#78350f', '#fcd34d'],
+                     losing: ['#7f1d1d', '#fca5a5'], inconclusive: ['#1f2937', '#9ca3af'],
+                     none: ['#1f2937', '#9ca3af'] }[rk.verdict?.level] || ['#1f2937', '#9ca3af'];
+      $('vd-verdict').innerHTML = `<div style="border:1px solid ${vpal[1]}55;background:${vpal[0]}33;`
+        + `border-radius:6px;padding:0.45rem 0.6rem;font-size:0.7rem;color:${vpal[1]}">`
+        + `${rk.verdict?.text || 'No closed trades yet.'}</div>`;
+
+      // ── offline backtest summary ──
+      let off = null;
+      try {
+        const r = await fetch('/signals/validation-summary.json?cb=' + Date.now(), noStore);
+        if (r.ok) off = await r.json();
+      } catch (e) { /* file may not exist yet */ }
+
+      if (!off) {
+        $('vd-offline').innerHTML = '<span class="muted">No offline validation run found. '
+          + 'Generate one with <code>python -m brain.validation.runner</code> in SignalsBrain.</span>';
+        CTX.validation = { live: rk, offline: null };
+        return;
+      }
+
+      const ageDays = Math.floor((Date.now() - Date.parse(off.generatedAt)) / 86400000);
+      const p = off.pooled || {};
+      const stale = ageDays > 14 || (off.engineBuild && off.engineBuild !== '2026-09-08-mr-v2');
+      let oh = `<div class="kv"><span class="k">Pooled trades</span><span class="v">${p.trades}</span></div>`;
+      oh += `<div class="kv"><span class="k">Expectancy / trade</span><span class="v ${p.expectancyPct > 0 ? 'text-green' : 'text-red'}">${p.expectancyPct > 0 ? '+' : ''}${p.expectancyPct}%</span></div>`;
+      oh += `<div class="kv"><span class="k">Profit factor</span><span class="v">${p.profitFactor}</span></div>`;
+      // The headline number. Displayed against its threshold so it cannot be mistaken
+      // for a plain Sharpe, which would look impressive rather than damning.
+      oh += `<div class="kv"><span class="k">Deflated Sharpe</span><span class="v ${p.deflatedSharpe >= 0.95 ? 'text-green' : 'text-amber'}">`
+          + `${p.deflatedSharpe} <span class="muted">/ 0.95 needed</span></span></div>`;
+      oh += `<div class="finding ${p.deflatedSharpe >= 0.95 ? '' : 'high'}" style="margin-top:0.4rem">${p.verdict}</div>`;
+      oh += `<div style="margin-top:0.4rem">` + (off.bySymbol || []).map(s =>
+        `<span class="chip ${s.expectancyPct > 0 ? 'r-none' : 'r-high'}">${s.symbol} `
+        + `<b>${s.expectancyPct > 0 ? '+' : ''}${s.expectancyPct}%</b> <span class="muted">n=${s.trades}</span></span>`).join('') + `</div>`;
+      oh += `<div class="muted" style="margin-top:0.4rem;font-size:0.65rem">corrected for ${off.trialsCorrectedFor} variants tried · `
+          + `${ageDays === 0 ? 'run today' : ageDays + 'd old'}${stale ? ' · <span class="text-red">STALE — re-run after engine changes</span>' : ''}</div>`;
+      oh += `<div class="muted" style="margin-top:0.35rem;font-size:0.65rem"><b>Limitations:</b> `
+          + (off.limitations || []).map(x => '• ' + x).join('<br>') + `</div>`;
+      $('vd-offline').innerHTML = oh;
+      $('vd-src').textContent = `engine ${off.engineBuild}`;
+
+      CTX.validation = {
+        live: { trades: rk.n, expectancyPct: rk.expectancyPct, profitFactor: rk.profitFactor,
+                sharpe: rk.sharpe, pValue: rk.pValue, verdict: rk.verdict?.text },
+        offline: { trades: p.trades, expectancyPct: p.expectancyPct, deflatedSharpe: p.deflatedSharpe,
+                   verdict: p.verdict, ageDays, stale, bySymbol: off.bySymbol,
+                   limitations: off.limitations },
+      };
+    }
+
     // ═══ 6. SKILLS ════════════════════════════════════════════════════════════
     async function loadSkills() {
       const d = await j(PROXY + '?action=skills&maxRisk=high' + bust());
@@ -660,13 +822,21 @@
 
     /** Only the slice of context relevant to what's on screen — keeps prompts small. */
     function scopedContext() {
+      // `strategy` and `validation` ride along on EVERY prompt regardless of panel.
+      // They are the two things that change the answer to almost any question here:
+      // what the engine is trying to do, and whether it has been shown to work. Leaving
+      // them out is how the copilot ended up able to discuss a setup's quality while
+      // unaware the record was statistically inconclusive.
       const base = { panelInView: CTX.panelTitle, instrument: CTX.instrument,
         marketOpen: CTX.marketOpen,
+        strategy: CTX.strategy,
+        validation: CTX.validation,
         safety: CTX.safety && { state: CTX.safety.state, executionAllowed: CTX.safety.executionAllowed, reason: CTX.safety.reason },
         integrity: CTX.integrity && { clean: CTX.integrity.clean, findings: CTX.integrity.findings.map(f=>f.code) } };
       const add = { market:{ indices: CTX.market }, chain:{ chain: CTX.chain },
         trade:{ trade: CTX.trade }, portfolio:{ portfolio: CTX.portfolio },
-        skills:{ skills: CTX.skills }, audit:{ audit: CTX.audit } }[CTX.panel] || {};
+        skills:{ skills: CTX.skills }, audit:{ audit: CTX.audit },
+        validation:{ validation: CTX.validation } }[CTX.panel] || {};
       return { ...base, ...add };
     }
 
@@ -687,7 +857,17 @@
         'The user is currently viewing: ' + ctx.panelInView + '.\n' +
         'All figures below were computed deterministically by the application. Do NOT recompute them, ' +
         'do NOT invent numbers, and say plainly if something needed is missing.\n' +
-        'If safety.executionAllowed is false, make clear that no trade can be taken regardless of the setup.\n\n' +
+        'If safety.executionAllowed is false, make clear that no trade can be taken regardless of the setup.\n' +
+        // Without these two instructions the model rationalised fades as trend trades and
+        // discussed setup quality as though the edge were established.
+        'The engine is MEAN-REVERSION (see strategy.thesis): it fades stretched extremes and therefore ' +
+        'trades AGAINST the short-term trend on purpose. Do not treat a contrary higher-timeframe bias ' +
+        'as evidence the signal is wrong; that is the design.\n' +
+        'IMPORTANT — honesty about the edge: validation.offline holds the last option-premium backtest, ' +
+        'including a deflated Sharpe that corrects for the number of variants tried. If that value is ' +
+        'below 0.95, or the trade count is small, you MUST say the edge is unproven and must not describe ' +
+        'the strategy as reliable or profitable, however good an individual setup looks. Mention ' +
+        'validation.offline.limitations when the user asks how much to trust the numbers.\n\n' +
         'CONTEXT JSON:\n' + JSON.stringify(ctx) + '\n\n' +
         'QUESTION: ' + question + '\n\nAnswer in under 160 words, specific and decision-oriented.';
 
@@ -732,6 +912,7 @@
       else if (nf > prevFindings) noteEvent(`${nf} state-integrity finding(s) detected`);
       prevSafety = st; prevFindings = nf;
       await loadPortfolio();
+      await loadValidation();
       await loadAudit();
       CTX.updatedAt = new Date().toISOString();
     }
