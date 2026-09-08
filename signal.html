@@ -71,12 +71,31 @@
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
     startBuildCheck('2026-08-28-r15');
-    import { paperTrader } from './js/paper-trading.js?v=4.8';
-    import { virtualTrader } from './js/virtual-trading.js?v=1.2';
+    import { paperTrader } from './js/paper-trading.js?v=4.9';
+    import { virtualTrader } from './js/virtual-trading.js?v=1.3';
     const PROXY = '/signals/api/proxy.php';
     const MONTHS = { '01':'Jan','02':'Feb','03':'Mar','04':'Apr','05':'May','06':'Jun','07':'Jul','08':'Aug','09':'Sep','10':'Oct','11':'Nov','12':'Dec' };
     const MONMAP = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
     let currentSignal = null;
+    // Last decision made by the automated paper desk, so this page can explain why a
+    // confirmed signal did or did not become a position instead of leaving the two
+    // pages looking like they disagree. Refreshed on each cycle; render() tolerates null.
+    let _paperDecision = null;
+    async function refreshPaperDecision() {
+      try {
+        const j = await fetchJSON(PROXY + '?action=paper_state&cb=' + Date.now());
+        const st = j && j.state;
+        if (!st) return;
+        const le = st.lastExecution || null;
+        _paperDecision = le ? {
+          executed: le.executed === true,
+          instrument: le.instrument || null,
+          reason: le.reason || null,
+          timestamp: le.timestamp || null,
+          openPositions: Array.isArray(st.active) ? st.active.length : null,
+        } : null;
+      } catch (e) { /* non-fatal: the panel is simply omitted */ }
+    }
 
     // Fetch expiry + ATM IV from option chain (cached server-side)
     async function getChainMeta(symbol, spot) {
@@ -721,6 +740,10 @@
         // on a held NO_TRADE signal) escaped to the outer catch, which also skipped
         // maybeAlert() and ingestToBrain() — so one missing field silently stopped
         // alerting and brain logging, and left the page showing stale markup.
+        // Fetch the desk's decision BEFORE rendering so the panel reflects this cycle.
+        // Awaited but non-throwing, so a failed poll degrades to no panel rather than
+        // taking down the render.
+        await refreshPaperDecision();
         try {
           render(sig, out);
         } catch (rErr) {
@@ -921,6 +944,38 @@
         }
         h += '</div>';
       })();
+      // ── AUTOMATED PAPER DESK: WHAT IT DID WITH THIS SIGNAL ────────────────────
+      // The reported problem: this page shows BUY while the paper desk holds nothing,
+      // which reads as the two pages contradicting each other. They were not
+      // contradicting — the desk applies POSITION-STATE and EXECUTION-QUALITY gates
+      // this page cannot see (already holding the instrument, correlated-exposure cap,
+      // max 3 open, 10-minute re-entry cooldown, per-trade cost cap, and above all a
+      // refusal to fill on a theoretical premium when no fresh live quote exists).
+      // The gates are right; their invisibility here was the defect. So the desk's own
+      // last decision is now shown next to the signal that produced it.
+      (function paperDeskPanel() {
+        const pd = _paperDecision;
+        if (!pd) return;
+        const executed = pd.executed === true;
+        const mine = pd.instrument && pd.instrument === s.symbol;
+        const age = pd.timestamp ? Math.round((Date.now() - Date.parse(pd.timestamp)) / 1000) : null;
+        const col = executed ? 'var(--primary)' : 'var(--warning)';
+        h += '<div class="mt-1 text-xs" style="padding:0.5rem 0.7rem;border-radius:6px;'
+           + 'background:rgba(148,163,184,0.06);border:1px solid ' + col + '55">'
+           + '<b style="color:' + col + '">Automated paper desk: '
+           + (executed ? 'POSITION OPENED' : 'DID NOT OPEN') + '</b>'
+           + (mine ? '' : ' <span class="text-muted">(last decision was for ' + (pd.instrument || '—') + ')</span>')
+           + '<div class="text-muted" style="margin-top:0.2rem">' + (pd.reason || '—')
+           + (age != null ? ' · ' + (age < 90 ? age + 's ago' : Math.round(age / 60) + 'm ago') : '')
+           + '</div>'
+           + (!executed && !contractReady
+               ? '<div class="text-muted" style="margin-top:0.2rem">This is expected when the exact '
+                 + 'listed contract has no fresh live quote — the desk will not fill at a theoretical '
+                 + 'price, because doing so books a fake entry and then an instant paper loss.</div>'
+               : '')
+           + '</div>';
+      })();
+
       // ── SIGNAL VALIDITY (lock) — so a confirmed signal never silently vanishes ──
       if (s._lockRemainMs > 0) {
         const mm = Math.floor(s._lockRemainMs/60000), ss = Math.floor((s._lockRemainMs%60000)/1000);

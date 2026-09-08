@@ -903,7 +903,22 @@ export class PaperTradingEngine {
     const effectiveEntry = premium + slippageCalc.entrySlippage;
     const cost = effectiveEntry * lotSize;
 
-    if (cost > MAX_PER_TRADE) return finish({ executed: false, reason: `Cost ₹${Math.round(cost)} > ₹${MAX_PER_TRADE} max per trade` });
+    // Per-trade cost cap. One lot is the minimum tradeable unit and cannot be split, so
+    // when a single lot already exceeds the cap the instrument is simply untradeable at
+    // that premium — no amount of sizing down helps. The old message just showed two
+    // numbers, which read like an arbitrary rejection; it now says WHY, and names the
+    // premium above which this contract becomes affordable, because on BANKNIFTY
+    // (30 x premium) and MIDCPNIFTY (120 x premium) the cap binds surprisingly often
+    // and was a silent, unexplained reason for a confirmed signal never appearing here.
+    if (cost > MAX_PER_TRADE) {
+      const affordablePremium = Math.floor((MAX_PER_TRADE / lotSize) * 100) / 100;
+      return finish({ executed: false, reason:
+        `One lot of ${signal.symbol} ${trade.strike} ${trade.type} costs ₹${Math.round(cost).toLocaleString('en-IN')} `
+        + `(₹${effectiveEntry} premium × ${lotSize} lot size), above the ₹${MAX_PER_TRADE.toLocaleString('en-IN')} per-trade cap. `
+        + `A lot cannot be split, so this contract is untradeable on this budget until its premium is under `
+        + `₹${affordablePremium} — the signal itself is unaffected.` },
+        { perTradeCap: MAX_PER_TRADE, attemptedCost: Math.round(cost), maxAffordablePremium: affordablePremium });
+    }
 
     // Determine which strategies qualify
     const qualifyingStrategies = [];
