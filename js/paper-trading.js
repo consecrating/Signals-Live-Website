@@ -21,6 +21,7 @@
 
 import { postJSON, authedFetch, primeWriteAuth } from './core/write-auth.js?v=1.0';
 import { godBrain } from './god-mode.js?v=2.5';
+import { summarize as riskSummarize, returnsFromTrades } from './core/risk-metrics.js?v=1.0';
 
 const PROXY = '/signals/api/proxy.php';
 const PT_VERSION = '4.6.0'; // Reward/risk measured to T2 runner target (0.90 floor kept)
@@ -1265,17 +1266,24 @@ export class PaperTradingEngine {
     const losses = trades.filter(t => t.pnl <= 0);
     const drawdown = s.peakCapital > 0 ? Math.round((1 - s.capital / s.peakCapital) * 100 * 10) / 10 : 0;
 
-    // Sharpe ratio (simplified: daily returns std dev)
-    let sharpe = 0;
-    if (s.equityCurve.length > 5) {
-      const returns = [];
-      for (let i = 1; i < s.equityCurve.length; i++) {
-        returns.push((s.equityCurve[i].equity - s.equityCurve[i-1].equity) / s.equityCurve[i-1].equity);
-      }
-      const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-      const stdDev = Math.sqrt(returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length);
-      sharpe = stdDev > 0 ? Math.round(avgReturn / stdDev * Math.sqrt(252) * 100) / 100 : 0;
-    }
+    // ── Risk statistics ───────────────────────────────────────────────────────
+    // Computed by the shared, unit-tested module rather than inline. The previous
+    // version had two defects: it used the POPULATION standard deviation (n) where a
+    // track record needs the SAMPLE one (n-1), and it guarded the divisor with
+    // `stdDev > 0` — a constant equity change has a floating-point std near 1e-18, not
+    // zero, which produced an absurd Sharpe instead of "no dispersion". It also measured
+    // per-DAY equity steps while annualising by 252 regardless of how many trades
+    // actually occurred.
+    //
+    // Per-trade returns are the right unit here: this desk's P&L arrives in discrete
+    // trades, not daily marks, and annualising on its own cadence avoids inflating the
+    // figure on a desk that trades a few times a week.
+    const _rets = returnsFromTrades(trades);
+    const _startMs = s.startDate ? new Date(s.startDate).getTime() : Date.now();
+    const _days = Math.max(1, (Date.now() - _startMs) / 86400000);
+    const _tradesPerYear = Math.max(1, Math.round((_rets.length / _days) * 252));
+    const _risk = riskSummarize(_rets, _tradesPerYear);
+    const sharpe = _risk.sharpe;
 
     // By regime
     const byRegime = {};
@@ -1322,6 +1330,9 @@ export class PaperTradingEngine {
       avgPnl: trades.length ? Math.round(s.totalPnl / trades.length) : 0,
       maxDrawdown: drawdown,
       sharpe,
+      // Full risk block, including the honest verdict on whether this record supports
+      // any conclusion yet. Same definitions as the offline validation harness.
+      risk: _risk,
       totalSlippage: Math.round(s.totalSlippage),
 
       // Active

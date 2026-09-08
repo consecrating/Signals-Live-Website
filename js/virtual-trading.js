@@ -26,6 +26,7 @@
 
 import { postJSON } from './core/write-auth.js?v=1.0';
 import { godBrain } from './god-mode.js?v=2.5';
+import { summarize as riskSummarize, returnsFromTrades } from './core/risk-metrics.js?v=1.0';
 
 export const VT_VERSION = '1.0.0';
 const PROXY = '/signals/api/proxy.php';
@@ -504,7 +505,27 @@ export class VirtualTradingEngine {
       maxDrawdownPct: s.peakCapital > 0 ? Math.round((1 - capital / s.peakCapital) * 1000) / 10 : 0,
       totalSlippage: _round2(s.totalSlippage || 0),
       byInstrument,
+      // Proper risk statistics, shared with the validation harness so a Sharpe quoted
+      // here means the same thing as one quoted in research. `risk.verdict` is the
+      // honest reading: it refuses to call anything an edge on a short record.
+      risk: this.getRiskMetrics(),
     };
+  }
+
+  /**
+   * Per-trade risk metrics for the closed book.
+   *
+   * Annualised on the desk's OWN trade cadence rather than 252, because this is an
+   * intraday desk that may take a handful of trades a week — using a daily constant
+   * would inflate Sharpe several-fold and is the commonest way these numbers mislead.
+   */
+  getRiskMetrics() {
+    const s = this.state;
+    const rets = returnsFromTrades(s.trades || []);
+    const start = s.startDate ? new Date(s.startDate).getTime() : Date.now();
+    const days = Math.max(1, (Date.now() - start) / 86400000);
+    const tradesPerYear = Math.max(1, Math.round((rets.length / days) * 252));
+    return riskSummarize(rets, tradesPerYear);
   }
 
   toCSV() {

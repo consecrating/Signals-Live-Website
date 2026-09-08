@@ -94,12 +94,17 @@
       <div class="pt-stat"><div class="label">Return</div><div class="val" id="s-ret">0%</div></div>
       <div class="pt-stat"><div class="label">Trades</div><div class="val purple" id="s-trades">0</div></div>
       <div class="pt-stat"><div class="label">Win Rate</div><div class="val" id="s-wr">—</div></div>
+      <div class="pt-stat"><div class="label">Expectancy</div><div class="val" id="s-exp">—</div></div>
+      <div class="pt-stat"><div class="label">Profit Factor</div><div class="val" id="s-pf">—</div></div>
       <div class="pt-stat"><div class="label">Sharpe</div><div class="val" id="s-sharpe">—</div></div>
+      <div class="pt-stat"><div class="label">Sortino</div><div class="val" id="s-sortino">—</div></div>
       <div class="pt-stat"><div class="label">Max DD</div><div class="val" id="s-dd">0%</div></div>
       <div class="pt-stat"><div class="label">Active</div><div class="val amber" id="s-active">0</div></div>
       <div class="pt-stat"><div class="label">Slippage</div><div class="val red" id="s-slip">₹0</div></div>
       <div class="pt-stat"><div class="label">Avg Hold</div><div class="val" id="s-hold">—</div></div>
     </div>
+    <!-- Statistical honesty banner: says plainly whether this record proves anything. -->
+    <div id="pt-verdict" style="margin:-0.4rem 0 1rem"></div>
 
     <!-- Equity Curve -->
     <div class="section-title">📈 Equity Curve</div>
@@ -183,8 +188,9 @@
     } catch (e) {}
   </script>
   <script type="module">
-    import { paperTrader, STRATEGIES } from './js/paper-trading.js?v=4.7';
+    import { paperTrader, STRATEGIES } from './js/paper-trading.js?v=4.8';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
+    import { summarize as riskSummarize, returnsFromTrades } from './js/core/risk-metrics.js?v=1.0';
     startBuildCheck('2026-08-28-r15');
 
     // ═══ SERVER IS THE ONLY SOURCE OF TRUTH ═══════════════════════════════════
@@ -251,6 +257,18 @@
       const holds = trades.map(t => t.holdMinutes).filter(x => typeof x === 'number');
       const rets = trades.map(t => t.pnlPct).filter(x => typeof x === 'number');
       const sd = _stdev(rets);
+
+      // Risk metrics over EVERY closed trade, not the 30 most recent that the table
+      // renders — truncating the sample would quietly change the statistics shown.
+      const allClosed = (_trades || s.trades || []);
+      const allRets = returnsFromTrades(allClosed.map(t => ({
+        pnlPct: t.pnlPct, pnl: t.pnl, cost: t.cost,
+        entryPremium: t.entryPremium != null ? t.entryPremium : t.entry,
+        qty: t.qty, lotSize: t.lotSize,
+      })));
+      const _startMs = s.startDate ? new Date(s.startDate).getTime() : Date.now();
+      const _elapsedDays = Math.max(1, (Date.now() - _startMs) / 86400000);
+      const allRisk = riskSummarize(allRets, Math.max(1, Math.round((allRets.length / _elapsedDays) * 252)));
       return {
         initialCapital: base,
         capital: rpt.capital != null ? rpt.capital : (s.capital != null ? s.capital : base),
@@ -263,11 +281,12 @@
         equityCurve: (rpt.equityCurve && rpt.equityCurve.length >= 2) ? rpt.equityCurve : [],
         active, activeCount: active.length,
         avgHoldMinutes: holds.length ? Math.round(holds.reduce((a, b) => a + b, 0) / holds.length) : 0,
-        // Sharpe needs dispersion; with <2 closed trades it is not defined, so show '—'
-        // rather than a fabricated number.
-        sharpe: (rets.length >= 2 && sd > 0)
-          ? Math.round((rets.reduce((a, b) => a + b, 0) / rets.length) / sd * 100) / 100
-          : null,
+        // Risk statistics from the shared, unit-tested module (js/core/risk-metrics.js),
+        // computed over the FULL closed book rather than the last 30 rows the table
+        // happens to display, and annualised on this desk's own trade cadence.
+        // Sharpe stays null below 2 closed trades: undefined, not zero.
+        sharpe: (allRisk.n >= 2) ? allRisk.sharpe : null,
+        risk: allRisk,
         startDate: s.startDate || '—',
         trades,
 
@@ -370,6 +389,34 @@
       document.getElementById('s-wr').className = 'val ' + (st.winRate >= 55 ? 'green' : st.winRate > 0 ? 'red' : '');
       document.getElementById('s-sharpe').textContent = (st.sharpe != null) ? st.sharpe : '—';
       document.getElementById('s-sharpe').className = 'val ' + (st.sharpe > 1 ? 'green' : st.sharpe > 0 ? 'amber' : st.sharpe < 0 ? 'red' : '');
+
+      // ── Risk block + honesty verdict ────────────────────────────────────────
+      const _rk = st.risk || {};
+      const _fmtInf = (v) => (v === Infinity ? '∞' : (v == null ? '—' : v));
+      const _setStat = (id, txt, cls) => {
+        const el = document.getElementById(id);
+        if (el) { el.textContent = txt; el.className = 'val ' + (cls || ''); }
+      };
+      _setStat('s-exp', _rk.n ? (_rk.expectancyPct >= 0 ? '+' : '') + _rk.expectancyPct + '%' : '—',
+        _rk.expectancyPct > 0 ? 'green' : _rk.expectancyPct < 0 ? 'red' : '');
+      _setStat('s-pf', _rk.n ? _fmtInf(_rk.profitFactor) : '—',
+        _rk.profitFactor > 1 ? 'green' : _rk.profitFactor > 0 ? 'red' : '');
+      _setStat('s-sortino', _rk.n ? _fmtInf(_rk.sortino) : '—',
+        _rk.sortino > 1 ? 'green' : _rk.sortino > 0 ? 'amber' : _rk.sortino < 0 ? 'red' : '');
+
+      const _vb = document.getElementById('pt-verdict');
+      if (_vb) {
+        const _v = _rk.verdict || { level: 'none', text: 'No closed trades yet.' };
+        const _pal = {
+          supported: ['#065f46', '#6ee7b7'], unproven: ['#78350f', '#fcd34d'],
+          losing: ['#7f1d1d', '#fca5a5'], inconclusive: ['#1f2937', '#9ca3af'],
+          none: ['#1f2937', '#9ca3af'],
+        }[_v.level] || ['#1f2937', '#9ca3af'];
+        const _extra = (_rk.n >= 2) ? ` <span style="opacity:0.75">(t=${_rk.tStat}, p=${_rk.pValue}, n=${_rk.n})</span>` : '';
+        _vb.innerHTML = `<div style="border:1px solid ${_pal[1]}55;background:${_pal[0]}33;border-radius:8px;`
+          + `padding:0.55rem 0.8rem;font-size:0.76rem;color:${_pal[1]}">`
+          + `<b>Statistical read:</b> ${_v.text}${_extra}</div>`;
+      }
       document.getElementById('s-dd').textContent = st.maxDrawdown + '%';
       document.getElementById('s-dd').className = 'val ' + (st.maxDrawdown > 15 ? 'red' : st.maxDrawdown > 5 ? 'amber' : 'green');
       document.getElementById('s-active').textContent = st.activeCount;

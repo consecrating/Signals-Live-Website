@@ -66,6 +66,7 @@
     </div>
 
     <div class="vt-stats" id="vt-stats"></div>
+    <div id="vt-verdict" style="margin:-0.5rem 0 1.1rem"></div>
 
     <div class="section-title">📈 Equity Curve</div>
     <div class="eq-chart"><svg id="eq" viewBox="0 0 600 90" preserveAspectRatio="none"></svg></div>
@@ -96,7 +97,7 @@
   </main>
 
   <script type="module">
-    import { virtualTrader, VT_VERSION, isMarketOpen } from './js/virtual-trading.js?v=1.1';
+    import { virtualTrader, VT_VERSION, isMarketOpen } from './js/virtual-trading.js?v=1.2';
     import { primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
     startBuildCheck('2026-08-28-r15');
@@ -115,6 +116,8 @@
       $('brain-toggle').checked = s.brainTraining !== false;
 
       const pf = st.profitFactor === Infinity ? '∞' : st.profitFactor;
+      const rk = st.risk || {};
+      const fmtR = (v) => (v === Infinity ? '∞' : (v == null ? '—' : v));
       $('vt-stats').innerHTML = [
         ['Capital', inr(st.capital), 'purple'],
         ['Cash Free', inr(st.cash), ''],
@@ -125,8 +128,31 @@
         ['Closed', st.closedCount, ''],
         ['Win Rate', st.totalFills ? st.winRate + '%' : '—', st.winRate >= 50 ? 'green' : 'red'],
         ['Profit Factor', pf, ''],
+        ['Expectancy', rk.n ? (rk.expectancyPct >= 0 ? '+' : '') + rk.expectancyPct + '%' : '—',
+          rk.expectancyPct > 0 ? 'green' : rk.expectancyPct < 0 ? 'red' : ''],
+        ['Sharpe', rk.n ? fmtR(rk.sharpe) : '—', rk.sharpe > 0 ? 'green' : rk.sharpe < 0 ? 'red' : ''],
+        ['Sortino', rk.n ? fmtR(rk.sortino) : '—', rk.sortino > 0 ? 'green' : rk.sortino < 0 ? 'red' : ''],
         ['Max DD', st.maxDrawdownPct + '%', 'red'],
       ].map(([l, v, c]) => `<div class="vt-stat"><div class="label">${l}</div><div class="val ${c}">${v}</div></div>`).join('');
+
+      // ── HONESTY BANNER ────────────────────────────────────────────────────────
+      // A win rate on a handful of trades looks like evidence and is not. This states
+      // plainly whether the record supports any conclusion yet, using the same
+      // verdict logic as the offline validation harness.
+      const vb = $('vt-verdict');
+      if (vb) {
+        const v = rk.verdict || { level: 'none', text: 'No closed trades yet.' };
+        const palette = {
+          supported: ['#065f46', '#6ee7b7'], unproven: ['#78350f', '#fcd34d'],
+          losing: ['#7f1d1d', '#fca5a5'], inconclusive: ['#1f2937', '#9ca3af'],
+          none: ['#1f2937', '#9ca3af'],
+        }[v.level] || ['#1f2937', '#9ca3af'];
+        const extra = (rk.n >= 2)
+          ? ` <span style="opacity:0.75">(t=${rk.tStat}, p=${rk.pValue}, n=${rk.n})</span>` : '';
+        vb.innerHTML = `<div style="border:1px solid ${palette[1]}55;background:${palette[0]}33;`
+          + `border-radius:8px;padding:0.55rem 0.8rem;font-size:0.76rem;color:${palette[1]}">`
+          + `<b>Statistical read:</b> ${v.text}${extra}</div>`;
+      }
 
       // Equity curve
       const eq = s.equityCurve || [];
