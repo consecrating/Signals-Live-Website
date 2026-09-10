@@ -968,11 +968,41 @@
            + '<div class="text-muted" style="margin-top:0.2rem">' + (pd.reason || '—')
            + (age != null ? ' · ' + (age < 90 ? age + 's ago' : Math.round(age / 60) + 'm ago') : '')
            + '</div>'
-           + (!executed && !contractReady
-               ? '<div class="text-muted" style="margin-top:0.2rem">This is expected when the exact '
-                 + 'listed contract has no fresh live quote — the desk will not fill at a theoretical '
-                 + 'price, because doing so books a fake entry and then an instant paper loss.</div>'
-               : '')
+           // Explain the ACTUAL refusal, not a guess.
+           //
+           // This used to print the "no fresh live quote" note whenever the desk had not
+           // opened and `contractReady` was false. But contractReady requires
+           // `actionable`, so it is false on EVERY NO_TRADE — meaning a refusal whose real
+           // reason was "Signal is NO_TRADE" was consistently blamed on a missing quote.
+           // The panel stated a cause that was not the cause, which is worse than saying
+           // nothing: it sends you looking at the broker feed when the engine simply had
+           // no setup. So the note is now driven by what the desk actually reported.
+           + (function explainRefusal() {
+               if (executed) return '';
+               const r = String(pd.reason || '').toLowerCase();
+               let why = '';
+               if (/no_trade/.test(r)) {
+                 why = 'The desk had nothing to act on — the engine returned NO_TRADE, so there '
+                     + 'was no entry to place. This is the system declining a setup, not failing '
+                     + 'to execute one. Note the engine can differ from a server-side alert sent '
+                     + 'minutes earlier: scores decay as price moves, and the desk also applies '
+                     + 'God Mode conviction and live-quote gates that the alert does not.';
+               } else if (/quote|premium|stale|liquid|executable|expiry/.test(r)) {
+                 why = 'The directional setup held, but the exact listed contract had no fresh '
+                     + 'live quote. The desk will not fill at a theoretical price, because that '
+                     + 'books a fake entry and then an instant paper loss.';
+               } else if (/cooldown|duplicate|already|max|cap|exposure|correlat/.test(r)) {
+                 why = 'A position-state guardrail refused this one — re-entry cooldown, an '
+                     + 'existing or correlated position, or an exposure cap. The signal itself '
+                     + 'was not the problem.';
+               } else if (/halt|safety|blocked/.test(r)) {
+                 why = 'The safety kernel is blocking execution. Check the Safety &amp; Control '
+                     + 'Plane on the God Mode page.';
+               }
+               return why
+                 ? '<div class="text-muted" style="margin-top:0.2rem">' + why + '</div>'
+                 : '';
+             })()
            + '</div>';
       })();
 

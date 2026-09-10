@@ -212,9 +212,18 @@ function cron_send_alert(array $sig, array &$out): bool {
         ? 'fade an oversold dip (long CE), expecting reversion up toward the mean'
         : 'fade an overbought rip (long PE), expecting reversion down toward the mean';
 
-    $subject = sprintf('[%s] %s %s %d%s — %d%% (server)',
-        $sig['direction'], $sig['symbol'], $sig['direction'] === 'BUY' ? 'CE' : 'PE',
-        $atm, '', (int)$sig['confidence']);
+    // "CANDIDATE", not "BUY".
+    //
+    // A real alert went out reading "[BUY] MIDCPNIFTY CE 14500 - 70%" and the automated
+    // desk then did nothing, because the browser stack returned NO_TRADE: God Mode
+    // conviction was 50% (below the 60% bar) and the score had decayed by the time the
+    // desk looked. The alert was not wrong about the engine — it was wrong to be phrased
+    // as an instruction, because this worker evaluates strictly LESS than the desk does.
+    // Anything worded as a decision that the system itself then declines destroys trust
+    // in every later alert, so the subject now says what it actually is.
+    $subject = sprintf('[CANDIDATE %s] %s %d %s — engine %d%%',
+        $sig['direction'], $sig['symbol'], $atm,
+        $sig['direction'] === 'BUY' ? 'CE' : 'PE', (int)$sig['confidence']);
 
     $rows = [
         'Instrument'      => $sig['symbol'],
@@ -236,6 +245,18 @@ function cron_send_alert(array $sig, array &$out): bool {
               . '</td><td style="padding:4px 0"><b>' . htmlspecialchars((string)$v) . '</b></td></tr>';
     }
     $html .= '</table>'
+        // State the boundary of what was actually checked. The desk applies gates this
+        // worker deliberately does not implement (they need live browser state or a full
+        // God Mode port), so it can legitimately refuse this candidate. Saying so here
+        // means a refusal reads as the system working rather than as a contradiction.
+        . '<p style="font-size:12px;color:#31708f;background:#eaf4fb;border:1px solid #bce8f1;'
+        . 'padding:8px;border-radius:4px;margin-top:12px"><b>This is a candidate, not a '
+        . 'confirmed trade.</b> The server checked the engine gates only: reversion score '
+        . 'inside ±30–50, ADX ≥ 25, RSI limits, and confidence. It did <b>not</b> check God '
+        . 'Mode conviction, whether the exact listed contract has a fresh live quote, or the '
+        . 'exposure and cooldown caps. The automated paper desk applies all of those and may '
+        . 'well decline this — if it does, that is the desk working correctly, not a fault. '
+        . 'Scores also decay as price moves, so a setup can be gone within minutes.</p>'
         // Every alert carries the honest caveat. The offline validation put the pooled
         // deflated Sharpe at 0.55 against the 0.95 needed, so presenting a signal
         // without that context would overstate what it is worth.
@@ -757,6 +778,14 @@ try {
             'note' => 'Generated server-side by api/cron.php, independent of any browser '
                     . 'session. Exits (stop/target/trail/schedule/15:20 square-off) are managed '
                     . 'autonomously; new positions are NOT opened autonomously by design.',
+            // Be explicit about the gate boundary so no consumer treats these as
+            // desk-confirmed decisions.
+            'gatesEvaluated' => ['conviction_window_30_50', 'adx_min_25', 'rsi_extremes',
+                                 'confidence_threshold', 'late_session_cutoff'],
+            'gatesNotEvaluated' => ['god_mode_conviction', 'live_quote_availability',
+                                    'option_chain_liquidity', 'exposure_and_correlation_caps',
+                                    'reentry_cooldown'],
+            'directionIsCandidateOnly' => true,
         ], JSON_UNESCAPED_SLASHES);
         kAtomicWrite(kDir() . '/server-signals.json', $signalsPayload);
         kAtomicWrite(__DIR__ . '/../server-signals.json', $signalsPayload);
