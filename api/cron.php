@@ -512,6 +512,56 @@ function cron_monitor_paper(array &$out): array {
     return ['closed' => $closed, 'marked' => $marked];
 }
 
+// ─── setup helper ────────────────────────────────────────────────────────────
+/**
+ * ?setup=1 — report the absolute paths this host actually uses, and the ready-to-paste
+ * cron lines built from them.
+ *
+ * Guessing the docroot and the PHP binary is the step where cPanel cron setup usually
+ * fails silently: a wrong path produces no error anywhere visible, just a job that
+ * never runs. The server knows both, so it should say so rather than leave you to
+ * infer them. Token-protected, since it discloses filesystem paths.
+ */
+if (($_GET['setup'] ?? '') === '1') {
+    $script = __DIR__ . '/cron.php';
+    // PHP_BINARY is the CLI binary under cron, but under mod_php/FPM it is the web
+    // server, so it is reported as a hint rather than an answer.
+    $binHint = (PHP_SAPI === 'cli' && PHP_BINARY) ? PHP_BINARY : (PHP_BINDIR . '/php');
+    $candidates = array_values(array_unique(array_filter([
+        $binHint, '/usr/local/bin/php', '/usr/bin/php', '/opt/cpanel/ea-php82/root/usr/bin/php',
+    ])));
+    $existing = array_values(array_filter($candidates, fn($p) => @is_file($p)));
+    $php = $existing[0] ?? '/usr/local/bin/php';
+
+    $res = [
+        'status' => true,
+        'setup' => true,
+        'scriptPath' => $script,
+        'phpBinary' => $php,
+        'phpBinaryCandidatesFound' => $existing,
+        'sapi' => PHP_SAPI,
+        'phpVersion' => PHP_VERSION,
+        'serverTimezone' => date_default_timezone_get(),
+        'serverTimeUtc' => gmdate('Y-m-d H:i') . ' UTC',
+        'serverTimeIst' => eng_ist_now()['date'] . ' ' . eng_ist_now()['time'] . ' IST',
+        'cronLines' => [
+            'market_hours_every_minute_UTC' =>
+                "*/1 3-10 * * 1-5 $php $script >/dev/null 2>&1",
+            'eod_squareoff_safety_net_UTC' =>
+                "45,50,55 9 * * 1-5 $php $script >/dev/null 2>&1",
+            'post_close_sweep_UTC' =>
+                "5,20 10 * * 1-5 $php $script >/dev/null 2>&1",
+        ],
+        'note' => 'Hour ranges are UTC and cover 09:15-15:30 IST (03:45-10:00 UTC). If this '
+                . "host's cron runs in IST instead (check serverTimezone), use 9-16 for the "
+                . 'first line, 15,20,25 15 for the second and 35,50 15 for the third. CLI runs '
+                . 'need no token.',
+    ];
+    if (PHP_SAPI === 'cli') { echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n"; }
+    else { echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); }
+    exit;
+}
+
 // ─── self-test ───────────────────────────────────────────────────────────────
 /**
  * ?selftest=alert — send one clearly-labelled TEST email and report whether the host

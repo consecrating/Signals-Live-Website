@@ -32,53 +32,82 @@ full live-quote execution gate stack, and enabling it silently would mean trades
 appearing with nobody watching. It is a conscious risk decision, not a side effect of
 fixing the laptop problem — ask before switching it on.
 
-## 1. Add a cron token
+## 1. The cron token
 
-Add one line to `api/config.secret.php` (never committed — `.gitignore` blocks it):
+**Already done** — a 48-character `cron_token` was generated and added to
+`api/config.secret.php` on the server (untracked, and still 403 over HTTP). Read it with:
 
-```php
-'cron_token' => 'PICK_A_LONG_RANDOM_STRING',
+```bash
+grep cron_token api/config.secret.php     # on the server, via FTP or File Manager
 ```
 
-If you skip this, the worker falls back to the existing `admin_token`, so it still
-works — but a dedicated token is better, since it can be rotated without touching
-anything else.
+Rotate it freely; nothing else uses it. CLI/cPanel cron does not need it at all — only
+HTTP callers do. If it were ever removed, the worker falls back to `admin_token`.
 
 ## 2. Schedule it
 
-### Option A — cPanel cron (preferred)
+### Option A — cPanel cron (preferred: 1-minute precision, most reliable)
 
-cPanel → **Cron Jobs**. Every minute during market hours, Mon–Fri:
-
-```
-*/1 4-11 * * 1-5   /usr/local/bin/php /home/USER/public_html/signals/api/cron.php >/dev/null 2>&1
-```
-
-Notes:
-- `4-11` is **UTC**, covering 09:15–15:30 IST (03:45–10:00 UTC) with margin. If your
-  server's cron runs in IST, use `9-16` instead.
-- Confirm the PHP binary path (`which php`, or cPanel usually shows it).
-- Replace `USER` and verify the docroot path.
-- CLI runs need no token.
-
-A second entry gives you a guaranteed end-of-day sweep even if the market-hours
-schedule is disrupted:
+cPanel → **Cron Jobs**. These lines are the real, verified paths for this host — do not
+substitute a guessed docroot, because a wrong path fails **silently** with no error
+anywhere visible:
 
 ```
-25,35 10 * * 1-5   /usr/local/bin/php /home/USER/public_html/signals/api/cron.php >/dev/null 2>&1
+*/1 3-10 * * 1-5   /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+45,50,55 9 * * 1-5 /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+5,20 10 * * 1-5    /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
 ```
 
-### Option B — external pinger (no shell access needed)
+Line 1 covers the session; line 2 over-covers the 15:20 IST square-off; line 3 sweeps
+after the close.
 
-Use any free scheduler ([cron-job.org](https://cron-job.org), UptimeRobot, etc.) to
-fetch, every minute:
+- Hours are **UTC** (this server's timezone is UTC, verified), covering 09:15–15:30 IST
+  = 03:45–10:00 UTC.
+- CLI runs need **no token**.
+- To re-derive these paths at any time (after a hosting move, PHP upgrade, etc.):
+  ```bash
+  curl -s "https://ads.sanctify.co.in/signals/api/cron.php?token=YOUR_TOKEN&setup=1"
+  ```
+  It reports the live `scriptPath`, `phpBinary`, server timezone, and ready-to-paste
+  cron lines.
+
+### Option B — GitHub Actions (no cPanel access needed)
+
+`.github/workflows/trading-worker.yml` is committed and ready. It runs on GitHub's
+infrastructure, so it fires with all of your devices switched off. **Two steps to
+activate:**
+
+1. **Settings → Secrets and variables → Actions → New repository secret**
+   - Name: `SIGNALS_CRON_TOKEN`
+   - Value: the `cron_token` from `api/config.secret.php` on the server
+2. **Merge the workflow into the default branch** — GitHub only runs schedules from the
+   default branch, so it does nothing while it sits on a feature branch.
+
+Then check **Actions → Trading worker**, or trigger it manually via **Run workflow**.
+
+Trade-offs against Option A, stated plainly:
+
+| | cPanel cron | GitHub Actions |
+|---|---|---|
+| Interval | 1 minute | 5 minutes minimum (the job internally ticks ~5× a minute apart to compensate) |
+| Punctuality | Reliable | **Not guaranteed** — GitHub delays or drops scheduled runs under load, sometimes 15+ min |
+| Token in flight | Never leaves the host | Sent as a header over TLS |
+| Setup | Paste 3 lines | Add a secret + merge |
+
+Because a delayed run could miss 15:20, the workflow over-covers the close, and
+`cron.php` squares off stale positions on **any** later run — so a late tick closes a
+position late, but can never leave one riding indefinitely.
+
+### Option C — external pinger
+
+Any free scheduler ([cron-job.org](https://cron-job.org), UptimeRobot, etc.) fetching:
 
 ```
 https://ads.sanctify.co.in/signals/api/cron.php?token=YOUR_CRON_TOKEN
 ```
 
-Slightly less reliable than real cron, and the token travels in the URL — so prefer
-Option A where possible.
+Prefer the header form where the service supports it (`X-Cron-Token: YOUR_CRON_TOKEN`),
+so the token stays out of URLs and logs.
 
 ## 3. Verify
 
