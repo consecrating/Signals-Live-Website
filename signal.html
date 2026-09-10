@@ -71,12 +71,31 @@
     import { postJSON, authedFetch, primeWriteAuth } from './js/core/write-auth.js?v=1.0';
     import { startBuildCheck } from './js/core/build-check.js?v=1.0';
     startBuildCheck('2026-08-28-r15');
-    import { paperTrader } from './js/paper-trading.js?v=4.7';
-    import { virtualTrader } from './js/virtual-trading.js?v=1.1';
+    import { paperTrader } from './js/paper-trading.js?v=4.9';
+    import { virtualTrader } from './js/virtual-trading.js?v=1.3';
     const PROXY = '/signals/api/proxy.php';
     const MONTHS = { '01':'Jan','02':'Feb','03':'Mar','04':'Apr','05':'May','06':'Jun','07':'Jul','08':'Aug','09':'Sep','10':'Oct','11':'Nov','12':'Dec' };
     const MONMAP = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
     let currentSignal = null;
+    // Last decision made by the automated paper desk, so this page can explain why a
+    // confirmed signal did or did not become a position instead of leaving the two
+    // pages looking like they disagree. Refreshed on each cycle; render() tolerates null.
+    let _paperDecision = null;
+    async function refreshPaperDecision() {
+      try {
+        const j = await fetchJSON(PROXY + '?action=paper_state&cb=' + Date.now());
+        const st = j && j.state;
+        if (!st) return;
+        const le = st.lastExecution || null;
+        _paperDecision = le ? {
+          executed: le.executed === true,
+          instrument: le.instrument || null,
+          reason: le.reason || null,
+          timestamp: le.timestamp || null,
+          openPositions: Array.isArray(st.active) ? st.active.length : null,
+        } : null;
+      } catch (e) { /* non-fatal: the panel is simply omitted */ }
+    }
 
     // Fetch expiry + ATM IV from option chain (cached server-side)
     async function getChainMeta(symbol, spot) {
@@ -121,6 +140,44 @@
     const BRAIN_URL = 'https://ads.sanctify.co.in/signals/api/proxy.php?action=brain_ingest';
     const _ingestSeen = {};     // dedup key -> last ts (ms)
     const _presignalSent = {};  // symbol|direction -> last pre-signal attempt (ms)
+    // ── Confirmed-signal log (permanent, date + IST time wise) ───────────────
+    // Separate from ingestToBrain() on purpose. That stream is telemetry: every
+    // instrument, every 30 seconds, ~96% NO_TRADE — useful for pattern statistics, useless
+    // for reading back what the system actually called and when. This writes one row per
+    // confirmed signal, with the desk's decision attached, and is deduplicated server-side
+    // on patternId so the refresh loop cannot spam it.
+    const SIGNAL_LOG_URL = '/signals/api/proxy.php?action=signal_log';
+    async function logConfirmedSignal(sig, snap, gm, ptResult) {
+      try {
+        if (!sig || sig.direction === 'NO_TRADE') return;
+        const trade = sig.optionTrade || sig.watchTrade || null;
+        await postJSON(SIGNAL_LOG_URL, {
+          ts: Date.now(),
+          instrument: sig.symbol,
+          direction: sig.direction,
+          optionType: trade?.type ?? (sig.direction === 'BUY' ? 'CE' : 'PE'),
+          strike: trade?.strike ?? sig.optionStrategy?.strike ?? null,
+          spot: sig.ltp ?? null,
+          premium: trade?.entryPremium ?? null,
+          expiry: trade?.expiry ?? null,
+          confidence: sig._rawConfidence ?? sig.confidence ?? null,
+          netScore: sig.netScore ?? null,
+          agreement: sig.agreement ?? null,
+          adx: sig.strategy?.adx ?? null,
+          rsi: sig.rsi ?? null,
+          regime: sig.strategy?.regime ?? null,
+          godConfidence: gm?.godConfidence ?? null,
+          adaptiveThreshold: gm?.adaptiveThreshold ?? null,
+          godActionable: gm?.actionable ?? null,
+          calibrated: gm?.calibration?.available ?? false,
+          deskDecision: ptResult ? (ptResult.executed ? 'OPENED' : 'REFUSED') : null,
+          deskReason: ptResult?.reason ?? null,
+          patternId: gm?.patternId ?? sig._patternId ?? null,
+          source: 'browser',
+        });
+      } catch (e) { /* logging must never break the signal path */ }
+    }
+
     async function ingestToBrain(symbol, snap, sig) {
       // DEDUP: the page re-scores every 10s. Without this, one unchanged setup gets
       // written dozens of times and the brain counts each copy as an independent
@@ -163,6 +220,31 @@
             // Lock state, so post-trade review can tell a held signal from a fresh one.
             locked: !!sig._lockRemainMs,
             held: !!sig._held,
+            // ── VALIDATION FEATURES ────────────────────────────────────────────
+            // Logged so the offline harness (SignalsBrain brain/validation) can later
+            // test these inputs against realised option P&L.
+            //
+            // Option-chain volume is the reason this block exists. It is measured on
+            // every signal but deliberately NOT scored into direction, because volume
+            // says how much traded and never on which side, and the chain endpoint
+            // keeps no history — so there is nothing to backtest a scored version
+            // against. Recording it here builds that history: once enough sessions
+            // accumulate, a directional use can be validated instead of assumed.
+            option_volume_total: sig.components?.volume?.metrics?.total ?? null,
+            option_volume_atm: sig.components?.volume?.metrics?.atmTotal ?? null,
+            option_volume_pe_ce: sig.components?.volume?.metrics?.putCallVolumeRatio ?? null,
+            option_volume_source: sig.components?.volume?.source ?? null,
+            // Component biases, so a factor's contribution can be attributed after the
+            // fact rather than re-derived from a moving codebase.
+            comp_reversion: sig.components?.reversion?.bias ?? null,
+            comp_extreme_fade: sig.components?.extremeFade?.bias ?? null,
+            comp_rsi_fade: sig.components?.rsiFade?.bias ?? null,
+            comp_options: sig.components?.options?.bias ?? null,
+            // Engine identity + gate state: without these, a future analysis cannot
+            // tell which version of the rules produced a given outcome.
+            engine_approach: sig.strategy?.approach ?? null,
+            engine_build: '2026-09-08-mr-v2',
+            agreement: sig.agreement ?? null,
             timestamp: Date.now() / 1000,
           }));
       } catch (e) { /* Silent — brain ingest is non-blocking */ }
@@ -505,6 +587,24 @@
           snap.instrumentType = meta.instrumentType;
         }
         if (fii && fii.status && fii.data) snap.fiiFlow = fii.data.fii;
+
+        // India VIX — wired in at last.
+        //
+        // god-mode.js has carried `vix: 6` and `vix_change: 7` in DIM_WEIGHTS and a
+        // dims.vix branch since it was written, but NOTHING ever set snapshot.vix. So the
+        // dimension never materialised, both weights were dead, and every brain_ingest row
+        // recorded `vix: 0` — a real zero, indistinguishable from a genuine reading of zero.
+        // The value was available the whole time: ?action=indices returns INDIAVIX, and
+        // live.html already displays it. Fetched here rather than deleting the dimension,
+        // because volatility regime is genuinely informative for option selection.
+        try {
+          const ix = await fetchJSON(PROXY + '?action=indices');
+          const v = ix?.data?.INDIAVIX;
+          if (v && Number(v.ltp) > 0) {
+            snap.vix = Number(v.ltp);
+            snap.vixChange = Number(v.percentChange ?? 0);
+          }
+        } catch (e) { /* leave vix undefined — absent is honest, 0 is a lie */ }
         if (news && news.status && news.data) snap.newsSentiment = news.data.sentiment;
         snap.mtfBias = mtf;
         if (gexResp && gexResp.status && gexResp.data) {
@@ -670,6 +770,15 @@
             console.log(`[PaperTrade] Shadow recorded: ${ptResult.reason}`);
           }
 
+          // Permanent, date-wise record of this confirmed signal.
+          //
+          // Logged HERE rather than at render time because this is the first point where
+          // the desk's decision is actually known — a log that recorded the call without
+          // recording whether the system acted on it would answer the less useful half of
+          // the question. Confirmed signals only; NO_TRADE is telemetry and stays in the
+          // ingest stream.
+          logConfirmedSignal(sig, snap, gm, ptResult);
+
           // Active positions were already requoted above by exact contract. The
           // current signal quote is not reused for unrelated positions.
 
@@ -696,6 +805,10 @@
         // on a held NO_TRADE signal) escaped to the outer catch, which also skipped
         // maybeAlert() and ingestToBrain() — so one missing field silently stopped
         // alerting and brain logging, and left the page showing stale markup.
+        // Fetch the desk's decision BEFORE rendering so the panel reflects this cycle.
+        // Awaited but non-throwing, so a failed poll degrades to no panel rather than
+        // taking down the render.
+        await refreshPaperDecision();
         try {
           render(sig, out);
         } catch (rErr) {
@@ -733,14 +846,62 @@
       const results = [];
       for (const s of AUTO_INDICES) {
         try {
-          const snap = await buildSnapshot(s, false); // candles only — fast ranking
+          // Rank on the SAME evidence the selected signal is judged on.
+          //
+          // This used to call buildSnapshot(s, false) — candles only. That omits GEX, PCR
+          // and IV, and the options component carries weight 20 of 100, joint-largest in
+          // the model. So every candidate was ranked with a fifth of the model forced to
+          // zero, then the winner was displayed and traded WITH it. The scanner was
+          // choosing on a materially different measurement from the one it then acted on,
+          // which is how a genuinely better instrument could lose to a worse one.
+          const snap = await buildSnapshot(s, false);
           if (!snap) continue;
           snap.mtfBias = await getMTF(s);
+
+          // Fetch the options context so the 20-weight component is real. One extra
+          // request per candidate, tolerated failure: if it does not arrive the candidate
+          // is still ranked, just with the same blind spot as before rather than being
+          // dropped.
+          try {
+            const g = await fetch(`${PROXY}?action=gex&symbol=${s}&cb=${Date.now()}`,
+                                  { cache: 'no-store' }).then(r => r.json());
+            if (g && g.status && g.data) {
+              snap.gex = g.data;
+              if (g.data.pcr > 0) snap.pcr = g.data.pcr;
+              if (g.data.avgIV > 0) snap.iv = g.data.avgIV / 100;
+              if (g.data.dte != null) snap.dte = g.data.dte;
+            }
+          } catch (e) { /* rank without it */ }
+
           const sig = generateSignal(snap, { confidenceThreshold: 60 });
+
+          // And rank on God Mode's own verdict, because that is what gates execution.
+          // Previously pickBest ranked on the raw engine confidence while the desk executed
+          // on godConfidence against a per-regime adaptive threshold — so the scanner could
+          // hand over the best engine score when a different instrument was the only one
+          // God Mode would endorse. rankEvaluate() is side-effect free (see god-mode.js).
+          let gmRank = null;
+          try { gmRank = godBrain.rankEvaluate(sig, snap); } catch (e) {}
+
+          const engineActionable = sig.direction !== 'NO_TRADE';
           const mtfAligned = !snap.mtfBias || (sig.netScore >= 0 ? snap.mtfBias > 0 : snap.mtfBias < 0);
-          const rank = (sig.direction !== 'NO_TRADE' ? 1000 : 0) + sig.confidence
-            + Math.abs(sig.netScore) * 0.1 + (mtfAligned ? 8 : -18);
-          results.push({ symbol: s, rank, actionable: sig.direction !== 'NO_TRADE' });
+
+          // Tiers, so a candidate that can actually be traded always outranks one that
+          // cannot, regardless of how pretty its score is:
+          //   2000  engine confirmed AND God Mode endorses it
+          //   1000  engine confirmed but below God Mode's bar
+          //      0  no engine signal
+          const tier = engineActionable ? (gmRank?.actionable ? 2000 : 1000) : 0;
+          // Within a tier, order by how far conviction clears its own threshold. That is
+          // the system's own quality measure and it is comparable across regimes, whereas
+          // a raw score is not: 60 in Trending clears a 55 bar while 70 in Choppy fails 75.
+          const margin = gmRank ? gmRank.margin : (sig.confidence - 60);
+          const rank = tier + margin + Math.abs(sig.netScore) * 0.1 + (mtfAligned ? 8 : -18);
+
+          results.push({ symbol: s, rank, actionable: engineActionable,
+                         godActionable: !!gmRank?.actionable,
+                         godConfidence: gmRank?.godConfidence ?? null,
+                         threshold: gmRank?.threshold ?? null });
         } catch (e) {}
         await new Promise(f => setTimeout(f, 250));
       }
@@ -755,10 +916,16 @@
         const cur = currentSignal && currentSignal.symbol;
         if (cur) {
           const curR = results.find(r => r.symbol === cur);
-          // Only hold the incumbent if it is actionable AND genuinely close to the best.
-          if (curR && curR.actionable && (results[0].rank - curR.rank) <= 12) chosen = cur;
+          // Hold the incumbent only if it is close AND no challenger has crossed into a
+          // higher tier — a candidate God Mode endorses must never lose to stickiness.
+          const sameTier = curR && (curR.godActionable === results[0].godActionable);
+          if (curR && curR.actionable && sameTier && (results[0].rank - curR.rank) <= 12) chosen = cur;
         }
         sel.value = chosen;
+        console.log('[AutoPick] ' + results.map(r =>
+          `${r.symbol} rank=${r.rank.toFixed(1)}`
+          + (r.godConfidence != null ? ` god=${Math.round(r.godConfidence)}/${Math.round(r.threshold)}` : '')
+          + (r.godActionable ? ' ✓' : '')).join('  ') + `  → ${chosen}`);
       }
       await run(silent);
     };
@@ -896,6 +1063,68 @@
         }
         h += '</div>';
       })();
+      // ── AUTOMATED PAPER DESK: WHAT IT DID WITH THIS SIGNAL ────────────────────
+      // The reported problem: this page shows BUY while the paper desk holds nothing,
+      // which reads as the two pages contradicting each other. They were not
+      // contradicting — the desk applies POSITION-STATE and EXECUTION-QUALITY gates
+      // this page cannot see (already holding the instrument, correlated-exposure cap,
+      // max 3 open, 10-minute re-entry cooldown, per-trade cost cap, and above all a
+      // refusal to fill on a theoretical premium when no fresh live quote exists).
+      // The gates are right; their invisibility here was the defect. So the desk's own
+      // last decision is now shown next to the signal that produced it.
+      (function paperDeskPanel() {
+        const pd = _paperDecision;
+        if (!pd) return;
+        const executed = pd.executed === true;
+        const mine = pd.instrument && pd.instrument === s.symbol;
+        const age = pd.timestamp ? Math.round((Date.now() - Date.parse(pd.timestamp)) / 1000) : null;
+        const col = executed ? 'var(--primary)' : 'var(--warning)';
+        h += '<div class="mt-1 text-xs" style="padding:0.5rem 0.7rem;border-radius:6px;'
+           + 'background:rgba(148,163,184,0.06);border:1px solid ' + col + '55">'
+           + '<b style="color:' + col + '">Automated paper desk: '
+           + (executed ? 'POSITION OPENED' : 'DID NOT OPEN') + '</b>'
+           + (mine ? '' : ' <span class="text-muted">(last decision was for ' + (pd.instrument || '—') + ')</span>')
+           + '<div class="text-muted" style="margin-top:0.2rem">' + (pd.reason || '—')
+           + (age != null ? ' · ' + (age < 90 ? age + 's ago' : Math.round(age / 60) + 'm ago') : '')
+           + '</div>'
+           // Explain the ACTUAL refusal, not a guess.
+           //
+           // This used to print the "no fresh live quote" note whenever the desk had not
+           // opened and `contractReady` was false. But contractReady requires
+           // `actionable`, so it is false on EVERY NO_TRADE — meaning a refusal whose real
+           // reason was "Signal is NO_TRADE" was consistently blamed on a missing quote.
+           // The panel stated a cause that was not the cause, which is worse than saying
+           // nothing: it sends you looking at the broker feed when the engine simply had
+           // no setup. So the note is now driven by what the desk actually reported.
+           + (function explainRefusal() {
+               if (executed) return '';
+               const r = String(pd.reason || '').toLowerCase();
+               let why = '';
+               if (/no_trade/.test(r)) {
+                 why = 'The desk had nothing to act on — the engine returned NO_TRADE, so there '
+                     + 'was no entry to place. This is the system declining a setup, not failing '
+                     + 'to execute one. Note the engine can differ from a server-side alert sent '
+                     + 'minutes earlier: scores decay as price moves, and the desk also applies '
+                     + 'God Mode conviction and live-quote gates that the alert does not.';
+               } else if (/quote|premium|stale|liquid|executable|expiry/.test(r)) {
+                 why = 'The directional setup held, but the exact listed contract had no fresh '
+                     + 'live quote. The desk will not fill at a theoretical price, because that '
+                     + 'books a fake entry and then an instant paper loss.';
+               } else if (/cooldown|duplicate|already|max|cap|exposure|correlat/.test(r)) {
+                 why = 'A position-state guardrail refused this one — re-entry cooldown, an '
+                     + 'existing or correlated position, or an exposure cap. The signal itself '
+                     + 'was not the problem.';
+               } else if (/halt|safety|blocked/.test(r)) {
+                 why = 'The safety kernel is blocking execution. Check the Safety &amp; Control '
+                     + 'Plane on the God Mode page.';
+               }
+               return why
+                 ? '<div class="text-muted" style="margin-top:0.2rem">' + why + '</div>'
+                 : '';
+             })()
+           + '</div>';
+      })();
+
       // ── SIGNAL VALIDITY (lock) — so a confirmed signal never silently vanishes ──
       if (s._lockRemainMs > 0) {
         const mm = Math.floor(s._lockRemainMs/60000), ss = Math.floor((s._lockRemainMs%60000)/1000);

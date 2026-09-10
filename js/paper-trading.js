@@ -21,6 +21,7 @@
 
 import { postJSON, authedFetch, primeWriteAuth } from './core/write-auth.js?v=1.0';
 import { godBrain } from './god-mode.js?v=2.5';
+import { summarize as riskSummarize, returnsFromTrades } from './core/risk-metrics.js?v=1.0';
 
 const PROXY = '/signals/api/proxy.php';
 const PT_VERSION = '4.6.0'; // Reward/risk measured to T2 runner target (0.90 floor kept)
@@ -898,11 +899,44 @@ export class PaperTradingEngine {
     if (godMode.calibration?.available && Number(godMode.calibration.calibratedScore) < 55) {
       return finish({ executed: false, reason: `Calibrated score ${godMode.calibration.calibratedScore}% is below 55%` });
     }
+
+    // DAILY LOSS STOP — enforced here, at the executor.
+    //
+    // God Mode computes gm.dailyLimit, but that flag was structurally always false: it read
+    // an in-memory counter mutated only by a method with no callers. So the 4% daily stop
+    // existed in the UI and in nobody's code path. Now that it is derived from the trade log
+    // (?action=daily_risk), the desk that actually opens positions has to honour it —
+    // checking it only in the advisory layer would leave the same hole one level down.
+    //
+    // This is the last line of defence after a bad day, so it refuses on the server-derived
+    // figure and does not fall back to a permissive default when that figure is absent.
+    const dr = godMode.dailyRisk;
+    if (dr && dr.breached === true) {
+      return finish({ executed: false, reason:
+        `Daily loss limit reached — realised ${Math.round(dr.realisedPnl)} against a `
+        + `${Math.round(dr.lossLimitAmount)} stop (${dr.lossLimitPct}% of ${Math.round(dr.capital)}). `
+        + `No new entries today.` });
+    }
     const slippageCalc = this.slippage.calculate(premium, lotSize, 1.0);
     const effectiveEntry = premium + slippageCalc.entrySlippage;
     const cost = effectiveEntry * lotSize;
 
-    if (cost > MAX_PER_TRADE) return finish({ executed: false, reason: `Cost ₹${Math.round(cost)} > ₹${MAX_PER_TRADE} max per trade` });
+    // Per-trade cost cap. One lot is the minimum tradeable unit and cannot be split, so
+    // when a single lot already exceeds the cap the instrument is simply untradeable at
+    // that premium — no amount of sizing down helps. The old message just showed two
+    // numbers, which read like an arbitrary rejection; it now says WHY, and names the
+    // premium above which this contract becomes affordable, because on BANKNIFTY
+    // (30 x premium) and MIDCPNIFTY (120 x premium) the cap binds surprisingly often
+    // and was a silent, unexplained reason for a confirmed signal never appearing here.
+    if (cost > MAX_PER_TRADE) {
+      const affordablePremium = Math.floor((MAX_PER_TRADE / lotSize) * 100) / 100;
+      return finish({ executed: false, reason:
+        `One lot of ${signal.symbol} ${trade.strike} ${trade.type} costs ₹${Math.round(cost).toLocaleString('en-IN')} `
+        + `(₹${effectiveEntry} premium × ${lotSize} lot size), above the ₹${MAX_PER_TRADE.toLocaleString('en-IN')} per-trade cap. `
+        + `A lot cannot be split, so this contract is untradeable on this budget until its premium is under `
+        + `₹${affordablePremium} — the signal itself is unaffected.` },
+        { perTradeCap: MAX_PER_TRADE, attemptedCost: Math.round(cost), maxAffordablePremium: affordablePremium });
+    }
 
     // Determine which strategies qualify
     const qualifyingStrategies = [];
@@ -1265,17 +1299,24 @@ export class PaperTradingEngine {
     const losses = trades.filter(t => t.pnl <= 0);
     const drawdown = s.peakCapital > 0 ? Math.round((1 - s.capital / s.peakCapital) * 100 * 10) / 10 : 0;
 
-    // Sharpe ratio (simplified: daily returns std dev)
-    let sharpe = 0;
-    if (s.equityCurve.length > 5) {
-      const returns = [];
-      for (let i = 1; i < s.equityCurve.length; i++) {
-        returns.push((s.equityCurve[i].equity - s.equityCurve[i-1].equity) / s.equityCurve[i-1].equity);
-      }
-      const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
-      const stdDev = Math.sqrt(returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length);
-      sharpe = stdDev > 0 ? Math.round(avgReturn / stdDev * Math.sqrt(252) * 100) / 100 : 0;
-    }
+    // ── Risk statistics ───────────────────────────────────────────────────────
+    // Computed by the shared, unit-tested module rather than inline. The previous
+    // version had two defects: it used the POPULATION standard deviation (n) where a
+    // track record needs the SAMPLE one (n-1), and it guarded the divisor with
+    // `stdDev > 0` — a constant equity change has a floating-point std near 1e-18, not
+    // zero, which produced an absurd Sharpe instead of "no dispersion". It also measured
+    // per-DAY equity steps while annualising by 252 regardless of how many trades
+    // actually occurred.
+    //
+    // Per-trade returns are the right unit here: this desk's P&L arrives in discrete
+    // trades, not daily marks, and annualising on its own cadence avoids inflating the
+    // figure on a desk that trades a few times a week.
+    const _rets = returnsFromTrades(trades);
+    const _startMs = s.startDate ? new Date(s.startDate).getTime() : Date.now();
+    const _days = Math.max(1, (Date.now() - _startMs) / 86400000);
+    const _tradesPerYear = Math.max(1, Math.round((_rets.length / _days) * 252));
+    const _risk = riskSummarize(_rets, _tradesPerYear);
+    const sharpe = _risk.sharpe;
 
     // By regime
     const byRegime = {};
@@ -1322,6 +1363,9 @@ export class PaperTradingEngine {
       avgPnl: trades.length ? Math.round(s.totalPnl / trades.length) : 0,
       maxDrawdown: drawdown,
       sharpe,
+      // Full risk block, including the honest verdict on whether this record supports
+      // any conclusion yet. Same definitions as the offline validation harness.
+      risk: _risk,
       totalSlippage: Math.round(s.totalSlippage),
 
       // Active

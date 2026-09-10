@@ -1,0 +1,114 @@
+# Scheduled trigger for the server-side trading worker.
+#
+# WHY THIS EXISTS
+# api/cron.php runs the engine on the server, but something has to CALL it. cPanel cron
+# is the better trigger (1-minute precision, runs on the same host, no token in flight)
+# and should be preferred — see docs/CRON-SETUP.md. This workflow is the fallback for
+# when cPanel cron is unavailable: it runs on GitHub's infrastructure, so it fires with
+# every one of your devices switched off, which is the whole point.
+#
+# HONEST LIMITATIONS — read before relying on this
+#  · GitHub's minimum schedule interval is 5 minutes, not 1.
+#  · Scheduled runs are NOT guaranteed to be punctual. Under load GitHub delays or even
+#    drops them, sometimes by 15+ minutes. For a 15:20 square-off that matters, which is
+#    why the schedule below deliberately over-covers the close, and why cron.php squares
+#    off stale positions on ANY later run — a delayed tick closes a position late, but it
+#    can never leave one riding indefinitely.
+#  · Schedules only run from the repository's DEFAULT branch. On a feature branch this
+#    file does nothing until merged.
+#  · Requires the repository secret SIGNALS_CRON_TOKEN. Without it every run fails 403.
+#
+# ACTIVATION (two steps, both need repo-owner rights)
+#  1. Settings -> Secrets and variables -> Actions -> New repository secret
+#       Name:  SIGNALS_CRON_TOKEN
+#       Value: the 'cron_token' from api/config.secret.php on the server
+#  2. Merge this file into the default branch.
+#
+# The token is sent as a header, never in a URL, so it stays out of logs and referrers.
+
+name: Trading worker
+
+on:
+  schedule:
+    # All times UTC. IST is UTC+5:30, so the 09:15-15:30 IST session is 03:45-10:00 UTC.
+    - cron: '*/5 3-10 * * 1-5'      # every 5 min through the session, Mon-Fri
+    - cron: '45,50,55 9 * * 1-5'    # 15:15 / 15:20 / 15:25 IST — square-off window
+    - cron: '5,20 10 * * 1-5'       # 15:35 / 15:50 IST — post-close sweep
+  workflow_dispatch:                # manual run, for testing
+
+# Never run two ticks concurrently. cron.php holds its own lock too, so an overlap is
+# safe rather than corrupting, but queueing avoids wasted runs that exit immediately.
+concurrency:
+  group: trading-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Tick the worker
+        env:
+          CRON_TOKEN: ${{ secrets.SIGNALS_CRON_TOKEN }}
+          WORKER_URL: https://ads.sanctify.co.in/signals/api/cron.php
+        run: |
+          set -uo pipefail
+
+          if [ -z "${CRON_TOKEN:-}" ]; then
+            echo "::error::SIGNALS_CRON_TOKEN is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          # GitHub can only schedule every 5 minutes, but open positions want checking
+          # more often than that. Each run therefore ticks 5 times about a minute apart,
+          # giving roughly 1-minute coverage from a 5-minute schedule. cron.php is
+          # idempotent and lock-guarded, so the extra ticks cost nothing.
+          fail=0
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -m 120 -o /tmp/tick.json -w '%{http_code}' \
+                     -H "X-Cron-Token: ${CRON_TOKEN}" "${WORKER_URL}" || echo 000)
+
+            if [ "$code" = "403" ]; then
+              echo "::error::403 from worker — SIGNALS_CRON_TOKEN does not match the server's cron_token."
+              exit 1
+            fi
+
+            if [ "$code" = "200" ]; then
+              # Summarise rather than dumping the payload into public build logs.
+              jq -r '"  " + (.ist // "?")
+                     + " | market " + (if .marketOpen then "open" else "closed" end)
+                     + " | scanned " + ((.signals // {}) | length | tostring)
+                     + " | actionable " + ((.signals // {} | to_entries
+                         | map(select(.value.direction != null and .value.direction != "NO_TRADE"))
+                         | length) | tostring)
+                     + " | alerts " + ((.alertsSent // 0) | tostring)
+                     + " | exits v=" + ((.virtual.closed // 0) | tostring)
+                     + " p=" + ((.paper.closed // 0) | tostring)
+                     + (if .error then "\n  worker error: " + .error else "" end)' \
+                /tmp/tick.json 2>/dev/null \
+                || echo "  tick $i: response was not valid JSON"
+
+              # Surface any actionable signal explicitly — that is the line worth reading.
+              jq -r '(.signals // {}) | to_entries[]
+                     | select(.value.direction != null and .value.direction != "NO_TRADE")
+                     | "    -> " + .key + " " + .value.direction
+                       + " conf=" + (.value.confidence | tostring)
+                       + " net=" + (.value.netScore | tostring)' \
+                /tmp/tick.json 2>/dev/null || true
+            else
+              # One transient failure should not fail the run; the next tick retries.
+              echo "  tick $i failed (HTTP $code)"
+              fail=$((fail + 1))
+            fi
+
+            if [ "$i" -lt 5 ]; then sleep 57; fi
+          done
+
+          if [ "$fail" -ge 5 ]; then
+            echo "::error::every tick in this run failed to reach the worker"
+            exit 1
+          fi
+          echo "run complete ($((5 - fail))/5 ticks reached the worker)"

@@ -26,6 +26,7 @@
 
 import { postJSON } from './core/write-auth.js?v=1.0';
 import { godBrain } from './god-mode.js?v=2.5';
+import { summarize as riskSummarize, returnsFromTrades } from './core/risk-metrics.js?v=1.0';
 
 export const VT_VERSION = '1.0.0';
 const PROXY = '/signals/api/proxy.php';
@@ -133,11 +134,51 @@ export class VirtualTradingEngine {
       const r = await fetch(VS_URL + '&cb=' + Date.now(), { cache: 'no-store' });
       const j = await r.json();
       if (j && j.status && j.state) {
+        // ── PRESERVE LIVE MARKS ACROSS A RE-HYDRATE ──────────────────────────
+        // monitor() requotes open positions but deliberately does NOT persist a
+        // marking-only tick (that churn made every manual click collide with a 409).
+        // So the SERVER's copy of an open position still carries the premium it had at
+        // entry. A wholesale `Object.assign` therefore overwrote the freshly requoted
+        // price with the stale one — and because the page re-hydrates every 10s while
+        // monitoring every 15s, the displayed "Live" price visibly alternated between
+        // the real premium and the entry premium, flipping P&L with it.
+        //
+        // Fix: keep the locally-computed mark for any position that still exists, when
+        // our mark is newer than the server's. Everything else (cash, trades, journal,
+        // equity curve, rev) still comes from the server, which remains authoritative
+        // for the ledger itself.
+        const localMarks = new Map();
+        for (const p of (this.state.active || [])) {
+          if (p && p.id && Number(p.lastQuoteAt) > 0) {
+            localMarks.set(p.id, {
+              currentPremium: p.currentPremium, peakPremium: p.peakPremium,
+              pnl: p.pnl, pnlPct: p.pnlPct, lastQuoteAt: Number(p.lastQuoteAt),
+            });
+          }
+        }
+
         this.state = Object.assign(this._defaultState(), j.state);
         if (!Array.isArray(this.state.active)) this.state.active = [];
         if (!Array.isArray(this.state.trades)) this.state.trades = [];
         if (!Array.isArray(this.state.journal)) this.state.journal = [];
         if (!Array.isArray(this.state.equityCurve)) this.state.equityCurve = [];
+
+        for (const p of this.state.active) {
+          const mk = localMarks.get(p.id);
+          if (!mk) continue;
+          // Only if our quote is genuinely fresher than whatever the server stored.
+          if (mk.lastQuoteAt > Number(p.lastQuoteAt || 0)) {
+            p.currentPremium = mk.currentPremium;
+            p.peakPremium = Math.max(Number(mk.peakPremium) || 0, Number(p.peakPremium) || 0);
+            p.pnl = mk.pnl;
+            p.pnlPct = mk.pnlPct;
+            p.lastQuoteAt = mk.lastQuoteAt;
+          }
+        }
+        // Re-derive capital from the marks actually on screen so the header total and
+        // the position rows cannot disagree.
+        this.state.capital = _round2((Number(this.state.cash) || 0) + this.state.active.reduce(
+          (a, p) => a + (Number(p.currentPremium) || p.effectiveEntry) * p.qty, 0));
       }
       this._hydrated = true;
     } catch (e) {
@@ -504,7 +545,27 @@ export class VirtualTradingEngine {
       maxDrawdownPct: s.peakCapital > 0 ? Math.round((1 - capital / s.peakCapital) * 1000) / 10 : 0,
       totalSlippage: _round2(s.totalSlippage || 0),
       byInstrument,
+      // Proper risk statistics, shared with the validation harness so a Sharpe quoted
+      // here means the same thing as one quoted in research. `risk.verdict` is the
+      // honest reading: it refuses to call anything an edge on a short record.
+      risk: this.getRiskMetrics(),
     };
+  }
+
+  /**
+   * Per-trade risk metrics for the closed book.
+   *
+   * Annualised on the desk's OWN trade cadence rather than 252, because this is an
+   * intraday desk that may take a handful of trades a week — using a daily constant
+   * would inflate Sharpe several-fold and is the commonest way these numbers mislead.
+   */
+  getRiskMetrics() {
+    const s = this.state;
+    const rets = returnsFromTrades(s.trades || []);
+    const start = s.startDate ? new Date(s.startDate).getTime() : Date.now();
+    const days = Math.max(1, (Date.now() - start) / 86400000);
+    const tradesPerYear = Math.max(1, Math.round((rets.length / days) * 252));
+    return riskSummarize(rets, tradesPerYear);
   }
 
   toCSV() {

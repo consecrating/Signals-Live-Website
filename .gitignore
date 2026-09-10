@@ -16,3 +16,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Runtime output of api/cron.php (regenerated every tick)
+server-signals.json
