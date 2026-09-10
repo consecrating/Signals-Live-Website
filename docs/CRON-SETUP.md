@@ -48,28 +48,64 @@ HTTP callers do. If it were ever removed, the worker falls back to `admin_token`
 
 ### Option A — cPanel cron (preferred: 1-minute precision, most reliable)
 
-cPanel → **Cron Jobs**. These lines are the real, verified paths for this host — do not
-substitute a guessed docroot, because a wrong path fails **silently** with no error
-anywhere visible:
+cPanel → **Cron Jobs** → Common Settings: *Once Per Minute (\* \* \* \* \*)*, then paste
+this as the command. **One line, nothing else needed:**
 
 ```
-*/1 3-10 * * 1-5   /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
-45,50,55 9 * * 1-5 /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
-5,20 10 * * 1-5    /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+/opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
 ```
 
-Line 1 covers the session; line 2 over-covers the 15:20 IST square-off; line 3 sweeps
-after the close.
+Full line if you are entering the schedule manually:
 
-- Hours are **UTC** (this server's timezone is UTC, verified), covering 09:15–15:30 IST
-  = 03:45–10:00 UTC.
-- CLI runs need **no token**.
-- To re-derive these paths at any time (after a hosting move, PHP upgrade, etc.):
-  ```bash
-  curl -s "https://ads.sanctify.co.in/signals/api/cron.php?token=YOUR_TOKEN&setup=1"
-  ```
-  It reports the live `scriptPath`, `phpBinary`, server timezone, and ready-to-paste
-  cron lines.
+```
+* * * * * /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+```
+
+**Why every minute with no hour range?** Because an hour range is the single most likely
+thing to be silently wrong. This host reports `phpTimezone: UTC` but
+`systemTimezone: Asia/Kolkata`, **and cron obeys the system one** — so a UTC-shaped
+range like `3-10` would actually run 03:00–10:59 IST: before the open, finishing by
+11:00, missing most of the session *and the 15:20 square-off*, while looking entirely
+plausible in the cPanel UI.
+
+`cron.php` already resolves IST correctly on its own and self-gates, so handing it every
+minute and letting it decide removes that whole class of error. Outside market hours with
+no open position it returns in well under a second and makes **no broker API calls**.
+
+Two details that make this cheap enough to run 1,440×/day:
+- Uneventful ticks write **no** audit rows (only exits and alerts are audited), so the
+  trail stays readable instead of being buried in heartbeats.
+- Liveness goes to `brain-data/cron-heartbeat.json`, rewritten each tick.
+
+Verified paths for this host (do **not** substitute a guessed docroot — a wrong path
+fails silently, with no error visible anywhere):
+
+| | Value |
+|---|---|
+| Script | `/home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php` |
+| PHP binary | `/opt/cpanel/ea-php82/root/usr/bin/php` (PHP 8.2.33) |
+| Cron timezone | `Asia/Kolkata` |
+
+CLI runs need **no token**.
+
+**If your host forbids an every-minute job**, use these instead — already converted into
+`Asia/Kolkata`, the timezone cron actually uses here:
+
+```
+*/1 9-15 * * 1-5    /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+15,20,25 15 * * 1-5 /opt/cpanel/ea-php82/root/usr/bin/php /home4/sanctqeo/public_html/sanctify.co.in/ads/signals/api/cron.php >/dev/null 2>&1
+```
+
+**Re-derive all of the above** any time the host changes PHP version, moves the docroot,
+or changes timezone:
+
+```bash
+curl -s "https://ads.sanctify.co.in/signals/api/cron.php?token=YOUR_TOKEN&setup=1"
+```
+
+It reports the live `scriptPath`, `phpBinary` (probing which candidates exist),
+`phpTimezone` vs `systemTimezone`, the market window converted into the cron timezone,
+and ready-to-paste lines built from those real values.
 
 ### Option B — GitHub Actions (no cPanel access needed)
 
@@ -174,8 +210,14 @@ needed, on 40 option trades. See `SignalsBrain/docs/VALIDATION.md`.
 
 ## Troubleshooting
 
+First check: is cron firing at all? `brain-data/cron-heartbeat.json` is rewritten on every
+tick, so its `lastTickAt` tells you immediately whether the problem is the schedule or
+the worker.
+
 | Symptom | Cause |
 |---|---|
+| Heartbeat missing or minutes old | Cron is not firing. Wrong PHP binary or script path is the usual reason — re-check with `?setup=1` |
+| Cron fires but at odd hours | An hour range written for the wrong timezone. Cron here runs in **Asia/Kolkata**, not UTC. Use `* * * * *` and let the script gate itself |
 | `403 cron token required` | Token missing/incorrect, or `config.secret.php` lacks `cron_token` **and** `admin_token` |
 | `another cron tick is still running` | Normal if a previous tick is slow; auto-clears, stale lock broken after 5 min |
 | `no candles` for a symbol | Broker API hiccup or rate limit — it retries next tick |

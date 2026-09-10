@@ -533,6 +533,33 @@ if (($_GET['setup'] ?? '') === '1') {
     $existing = array_values(array_filter($candidates, fn($p) => @is_file($p)));
     $php = $existing[0] ?? '/usr/local/bin/php';
 
+    // Derive the hour range from the timezone cron ACTUALLY uses, rather than assuming.
+    // This host reports php=UTC but system=Asia/Kolkata, and cron follows the system: a
+    // UTC-shaped range like "3-10" would have run 03:00-10:59 IST, i.e. before the open
+    // and finishing by 11:00, missing most of the session and the 15:20 square-off
+    // entirely — while looking perfectly plausible in the cPanel UI.
+    $sysTzName = (function () {
+        $tz = @readlink('/etc/localtime');
+        if (is_string($tz) && preg_match('#zoneinfo/(.+)$#', $tz, $m)) return $m[1];
+        $f = @file_get_contents('/etc/timezone');
+        if (is_string($f) && trim($f) !== '') return trim($f);
+        return 'UTC';
+    })();
+    try { $sysTz = new DateTimeZone($sysTzName); } catch (Throwable $e) { $sysTz = new DateTimeZone('UTC'); $sysTzName = 'UTC (unresolved)'; }
+    $istTz = new DateTimeZone('Asia/Kolkata');
+    $localise = function (string $hhmm) use ($istTz, $sysTz) {
+        $d = new DateTime('today ' . $hhmm, $istTz);
+        $d->setTimezone($sysTz);
+        return ['h' => (int)$d->format('G'), 'm' => (int)$d->format('i'), 'day' => $d->format('Y-m-d')];
+    };
+    $openL  = $localise('09:15');
+    $closeL = $localise('15:30');
+    $eodL   = $localise('15:20');
+    // If the offset pushes the window across midnight, an hour range is not expressible
+    // as one line; say so rather than emit something subtly broken.
+    $wraps = $closeL['h'] < $openL['h'];
+    $hourRange = $wraps ? null : ($openL['h'] === $closeL['h'] ? (string)$openL['h'] : $openL['h'] . '-' . $closeL['h']);
+
     $res = [
         'status' => true,
         'setup' => true,
@@ -541,21 +568,46 @@ if (($_GET['setup'] ?? '') === '1') {
         'phpBinaryCandidatesFound' => $existing,
         'sapi' => PHP_SAPI,
         'phpVersion' => PHP_VERSION,
-        'serverTimezone' => date_default_timezone_get(),
+        // PHP's timezone and the SYSTEM timezone are different things, and cron obeys the
+        // system one. Reporting only the PHP setting would invite an hour-range that is
+        // silently wrong — so both are shown, and the recommended schedule below avoids
+        // depending on either.
+        'phpTimezone' => date_default_timezone_get(),
+        'systemTimezone' => (function () {
+            $tz = @readlink('/etc/localtime');
+            if (is_string($tz) && preg_match('#zoneinfo/(.+)$#', $tz, $m)) return $m[1];
+            $f = @file_get_contents('/etc/timezone');
+            if (is_string($f) && trim($f) !== '') return trim($f);
+            return 'unknown';
+        })(),
         'serverTimeUtc' => gmdate('Y-m-d H:i') . ' UTC',
         'serverTimeIst' => eng_ist_now()['date'] . ' ' . eng_ist_now()['time'] . ' IST',
+        'cronTimezoneUsed' => $sysTzName,
+        'marketWindowInCronTimezone' => sprintf('%02d:%02d-%02d:%02d',
+            $openL['h'], $openL['m'], $closeL['h'], $closeL['m']),
         'cronLines' => [
-            'market_hours_every_minute_UTC' =>
-                "*/1 3-10 * * 1-5 $php $script >/dev/null 2>&1",
-            'eod_squareoff_safety_net_UTC' =>
-                "45,50,55 9 * * 1-5 $php $script >/dev/null 2>&1",
-            'post_close_sweep_UTC' =>
-                "5,20 10 * * 1-5 $php $script >/dev/null 2>&1",
+            // RECOMMENDED. No hour range at all, so it cannot be broken by a timezone
+            // mistake. cron.php resolves IST itself via Asia/Kolkata and self-gates:
+            // outside market hours with no open position it returns in milliseconds
+            // without touching the broker API.
+            'recommended_timezone_proof' =>
+                "* * * * * $php $script >/dev/null 2>&1",
+            // Narrower alternative, built from the DETECTED cron timezone above.
+            'alt_market_hours_only' => $hourRange === null
+                ? 'not expressible as a single hour range in ' . $sysTzName
+                  . ' (the IST session crosses midnight there) — use recommended_timezone_proof'
+                : "*/1 $hourRange * * 1-5 $php $script >/dev/null 2>&1",
+            'alt_eod_squareoff' => sprintf('%d,%d,%d %d * * 1-5 %s %s >/dev/null 2>&1',
+                max(0, $eodL['m'] - 5), $eodL['m'], min(59, $eodL['m'] + 5), $eodL['h'], $php, $script),
         ],
-        'note' => 'Hour ranges are UTC and cover 09:15-15:30 IST (03:45-10:00 UTC). If this '
-                . "host's cron runs in IST instead (check serverTimezone), use 9-16 for the "
-                . 'first line, 15,20,25 15 for the second and 35,50 15 for the third. CLI runs '
-                . 'need no token.',
+        'note' => 'Use recommended_timezone_proof. Every minute, all day, and the script decides '
+                . 'what to do — which removes the most common setup failure: an hour range '
+                . 'written for the wrong timezone. NOTE this host reports phpTimezone=UTC but '
+                . 'systemTimezone=' . $sysTzName . ', and cron obeys the SYSTEM one, so a '
+                . 'UTC-shaped range here would silently run at the wrong times. The alt_* lines '
+                . 'above are already converted into ' . $sysTzName . ' (session = '
+                . sprintf('%02d:%02d-%02d:%02d', $openL['h'], $openL['m'], $closeL['h'], $closeL['m'])
+                . ' local). CLI runs need no token.',
     ];
     if (PHP_SAPI === 'cli') { echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n"; }
     else { echo json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES); }
@@ -710,13 +762,34 @@ try {
         kAtomicWrite(__DIR__ . '/../server-signals.json', $signalsPayload);
     }
 
-    auditLog('recovery', 'cron_tick', [
+    // Audit only ticks that DID something.
+    //
+    // The recommended schedule is every minute all day (timezone-proof), which would
+    // otherwise write ~1,440 identical "nothing happened" rows a day straight into the
+    // audit trail — burying the exits and alerts that the trail exists to preserve, and
+    // growing the file for no reason. Individual exits and alerts already log themselves,
+    // so this records the tick-level summary only when it carries information. A
+    // heartbeat file, rewritten every tick, covers "is it alive?" instead.
+    $didSomething = ($out['virtual']['closed'] ?? 0) > 0
+                 || ($out['paper']['closed'] ?? 0) > 0
+                 || $out['alertsSent'] > 0;
+    if ($didSomething) {
+        auditLog('recovery', 'cron_tick', [
+            'marketOpen' => $marketOpen,
+            'signals' => count($out['signals']),
+            'alerts' => $out['alertsSent'],
+            'virtualClosed' => $out['virtual']['closed'] ?? 0,
+            'paperClosed' => $out['paper']['closed'] ?? 0,
+        ]);
+    }
+
+    kAtomicWrite(kDir() . '/cron-heartbeat.json', json_encode([
+        'lastTickAt' => gmdate('c'),
+        'ist' => $out['ist'],
         'marketOpen' => $marketOpen,
-        'signals' => count($out['signals']),
-        'alerts' => $out['alertsSent'],
-        'virtualClosed' => $out['virtual']['closed'] ?? 0,
-        'paperClosed' => $out['paper']['closed'] ?? 0,
-    ]);
+        'signalsScanned' => count($out['signals']),
+        'positionsMarked' => ($out['virtual']['marked'] ?? 0) + ($out['paper']['marked'] ?? 0),
+    ], JSON_UNESCAPED_SLASHES));
 } catch (Throwable $e) {
     $out['status'] = false;
     $out['error'] = $e->getMessage();
