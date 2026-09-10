@@ -899,6 +899,24 @@ export class PaperTradingEngine {
     if (godMode.calibration?.available && Number(godMode.calibration.calibratedScore) < 55) {
       return finish({ executed: false, reason: `Calibrated score ${godMode.calibration.calibratedScore}% is below 55%` });
     }
+
+    // DAILY LOSS STOP — enforced here, at the executor.
+    //
+    // God Mode computes gm.dailyLimit, but that flag was structurally always false: it read
+    // an in-memory counter mutated only by a method with no callers. So the 4% daily stop
+    // existed in the UI and in nobody's code path. Now that it is derived from the trade log
+    // (?action=daily_risk), the desk that actually opens positions has to honour it —
+    // checking it only in the advisory layer would leave the same hole one level down.
+    //
+    // This is the last line of defence after a bad day, so it refuses on the server-derived
+    // figure and does not fall back to a permissive default when that figure is absent.
+    const dr = godMode.dailyRisk;
+    if (dr && dr.breached === true) {
+      return finish({ executed: false, reason:
+        `Daily loss limit reached — realised ${Math.round(dr.realisedPnl)} against a `
+        + `${Math.round(dr.lossLimitAmount)} stop (${dr.lossLimitPct}% of ${Math.round(dr.capital)}). `
+        + `No new entries today.` });
+    }
     const slippageCalc = this.slippage.calculate(premium, lotSize, 1.0);
     const effectiveEntry = premium + slippageCalc.entrySlippage;
     const cost = effectiveEntry * lotSize;

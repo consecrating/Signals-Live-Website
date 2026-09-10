@@ -47,6 +47,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/engine.php';
 require_once __DIR__ . '/kernel.php';
+require_once __DIR__ . '/godstate.php';
+require_once __DIR__ . '/signallog.php';
 
 const CRON_INSTRUMENTS   = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
 const CRON_CONF_THRESHOLD = 60.0;
@@ -285,6 +287,97 @@ function cron_send_alert(array $sig, array &$out): bool {
     return (bool)$ok;
 }
 
+// ─── outcome feedback into God Mode ──────────────────────────────────────────
+/**
+ * Label the God Mode pattern behind a position the SERVER just closed.
+ *
+ * Without this, the cron worker was quietly destroying the system's only source of
+ * learning. Every position it squared off — which is the entire reason it exists — closed
+ * without ever labelling the pattern that produced it, so the outcome was gone. Combined
+ * with the lease no-op on the browser side, that is how the live store reached 425 patterns
+ * against 5 outcomes, leaving calibration permanently dormant at a 20-sample threshold.
+ *
+ * Failures are logged, never fatal: a missing pattern link must not stop a square-off.
+ */
+function cron_feed_outcome(array $pos, string $outcome, $pnlPct, $holdMin, array &$out): void {
+    $pid = $pos['patternId'] ?? null;
+    if (!$pid) {
+        cron_log($out, '    (no patternId on this position — outcome cannot be attributed)');
+        return;
+    }
+    $res = gs_record_outcome($pid, $outcome, $pnlPct, null, $holdMin, 'server-cron');
+    if (!empty($res['ok'])) {
+        cron_log($out, sprintf('    outcome fed to God Mode: %s -> %s (%d completed total%s)',
+            substr((string)$pid, 0, 24), $outcome, (int)$res['completedTotal'],
+            $res['completedTotal'] >= 20 ? ', CALIBRATION ACTIVE' : ', needs 20'));
+        auditLog('order', 'god_outcome_recorded', ['patternId' => (string)$pid,
+            'outcome' => $outcome, 'completedTotal' => $res['completedTotal'], 'by' => 'server-cron']);
+    } else {
+        cron_log($out, '    outcome NOT recorded: ' . ($res['reason'] ?? 'unknown'));
+    }
+}
+
+/**
+ * Sweep the desks' closed-trade histories and label any pattern still missing its outcome.
+ *
+ * Fixing the two known holes is not enough on its own. The loop had been leaking silently
+ * for weeks with nothing to reveal it, and the only reason it was ever noticed was a manual
+ * count of the store. A close path that forgets to label — a new desk, a manual exit, a
+ * failed request, a tab closed mid-write — puts the system straight back into the state it
+ * was just rescued from, and just as invisibly.
+ *
+ * So the authority is inverted: the trade log is ground truth, and every tick reconciles the
+ * pattern store against it. A missed label becomes a delay of at most one minute instead of
+ * permanent data loss. This also recovers outcomes already lost, which is how the fix gets
+ * verified against real data rather than a fixture.
+ *
+ * Idempotent by construction: gs_record_outcome() refuses to relabel.
+ */
+function cron_reconcile_outcomes(array &$out): array {
+    $repaired = 0; $checked = 0;
+
+    // Virtual desk — trades live inside its state file.
+    $vs = cron_read_json(kDir() . '/virtual/state.json');
+    foreach (($vs['trades'] ?? []) as $t) {
+        $pid = $t['patternId'] ?? null;
+        $oc  = $t['outcome'] ?? ($t['status'] ?? null);
+        if (!$pid || !$oc) continue;
+        $checked++;
+        $r = gs_record_outcome($pid, $oc, $t['pnlPct'] ?? null, null, $t['holdMinutes'] ?? null,
+                               'reconcile-virtual');
+        if (!empty($r['ok'])) {
+            $repaired++;
+            cron_log($out, sprintf('    RECOVERED virtual outcome: %s %s -> %s (%d completed)',
+                $t['instrument'] ?? '?', substr((string)$pid, 0, 22), $oc, (int)$r['completedTotal']));
+        }
+    }
+
+    // Paper desk — trades are append-only JSONL.
+    $tf = kPaperTrades();
+    if (is_file($tf)) {
+        foreach (file($tf, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            $t = json_decode($line, true);
+            if (!is_array($t)) continue;
+            $pid = $t['patternId'] ?? null;
+            $oc  = $t['outcome'] ?? null;
+            if (!$pid || !$oc) continue;
+            $checked++;
+            $r = gs_record_outcome($pid, $oc, $t['pnlPct'] ?? null, null, $t['holdMinutes'] ?? null,
+                                   'reconcile-paper');
+            if (!empty($r['ok'])) {
+                $repaired++;
+                cron_log($out, sprintf('    RECOVERED paper outcome: %s %s -> %s (%d completed)',
+                    $t['instrument'] ?? '?', substr((string)$pid, 0, 22), $oc, (int)$r['completedTotal']));
+            }
+        }
+    }
+
+    if ($repaired > 0) {
+        auditLog('recovery', 'god_outcomes_reconciled', ['repaired' => $repaired, 'checked' => $checked]);
+    }
+    return ['checked' => $checked, 'repaired' => $repaired];
+}
+
 // ─── virtual desk: monitor + square off ──────────────────────────────────────
 /**
  * Applies the same exit rules as js/virtual-trading.js: hard stop, target, trailing
@@ -388,6 +481,7 @@ function cron_monitor_virtual(array &$out): array {
             $pos['type'] ?? '', $px, $outcome, $pnl));
         auditLog('order', 'cron_virtual_exit', ['instrument' => $pos['instrument'] ?? '',
             'outcome' => $outcome, 'pnl' => $pnl, 'holdMinutes' => $holdMin]);
+        cron_feed_outcome($pos, $outcome, $eff > 0 ? (($px - $eff) / $eff) * 100 : 0, $holdMin, $out);
     }
 
     if (!$changed) return ['closed' => 0, 'marked' => 0];
@@ -497,6 +591,9 @@ function cron_monitor_paper(array &$out): array {
             'slippage'   => (float)($pos['slippage'] ?? 0),
             'lotSize'    => (int)($pos['lotSize'] ?? 0),
             'closedBy'   => 'server-cron',
+            // Carried through so the reconciliation sweep can join this trade back to its
+            // pattern even if the direct labelling call above failed.
+            'patternId'  => isset($pos['patternId']) ? (string)$pos['patternId'] : null,
         ];
         @file_put_contents(kPaperTrades(), json_encode($record) . "\n", FILE_APPEND | LOCK_EX);
 
@@ -514,6 +611,7 @@ function cron_monitor_paper(array &$out): array {
             $pos['type'] ?? '', $px, $outcome, $pnl));
         auditLog('order', 'cron_paper_exit', ['instrument' => $pos['instrument'] ?? '',
             'outcome' => $outcome, 'pnl' => $pnl, 'holdMinutes' => $holdMin]);
+        cron_feed_outcome($pos, $outcome, $pnlPct, $holdMin, $out);
     }
 
     if (!$changed) return ['closed' => 0, 'marked' => 0];
@@ -708,6 +806,16 @@ try {
         $out['virtual']['marked'], $out['virtual']['closed'],
         $out['paper']['marked'], $out['paper']['closed']));
 
+    // ── 1b. RECONCILE THE LEARNING LOOP ──────────────────────────────────────
+    // Runs every tick, market open or not, because an unlabelled pattern is a permanent
+    // loss of the scarcest data in the system and the cost of checking is a file read.
+    $out['outcomes'] = cron_reconcile_outcomes($out);
+    $out['loop'] = gs_outcome_stats();
+    cron_log($out, sprintf('  learning loop: %d/%d patterns labelled%s · repaired %d this tick',
+        $out['loop']['completed'], $out['loop']['patterns'],
+        $out['loop']['calibrationActive'] ? ' · CALIBRATION ACTIVE' : ' · needs 20 to calibrate',
+        $out['outcomes']['repaired']));
+
     // ── 2. SIGNALS ────────────────────────────────────────────────────────────
     if (!$marketOpen) {
         cron_log($out, '  outside market hours — no signal generation');
@@ -750,6 +858,31 @@ try {
                 $sig['adx'] ?? '—', $sig['vetoes'] ? '· ' . explode(':', $sig['vetoes'][0])[0] : ''));
 
             if ($sig['direction'] !== 'NO_TRADE') {
+                // Log it before alerting, so the permanent record exists even if mail fails.
+                // Marked source=server-cron because this path evaluates the engine gates only
+                // — the log must not imply God Mode conviction was ever checked.
+                $logged = sl_append([
+                    'ts' => time(),
+                    'instrument' => $sym,
+                    'direction' => $sig['direction'],
+                    'optionType' => $sig['optionType'],
+                    'strike' => $sig['atmStrike'],
+                    'spot' => $sig['ltp'],
+                    'confidence' => $sig['confidence'],
+                    'netScore' => $sig['netScore'],
+                    'agreement' => $sig['agreement'] ?? null,
+                    'adx' => $sig['adx'],
+                    'rsi' => $sig['rsi'],
+                    'regime' => $sig['regime'],
+                    'deskDecision' => null,
+                    'deskReason' => 'Server-side candidate; the automated desk evaluates '
+                                  . 'God Mode conviction and live-quote gates separately.',
+                    'source' => 'server-cron',
+                ]);
+                if (!empty($logged['ok']) && empty($logged['deduped'])) {
+                    cron_log($out, "  logged confirmed signal to {$logged['istDate']} at {$logged['istTime']} IST");
+                }
+
                 if (!$safetyOk) {
                     cron_log($out, '  alert withheld: safety state blocks execution');
                 } elseif (cron_send_alert($sig, $out)) {

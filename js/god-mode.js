@@ -68,6 +68,32 @@ async function godHydrate() {
   return _godState;
 }
 
+// ─── daily risk (server-derived) ─────────────────────────────────────────────
+// Refreshed on a short TTL rather than once at load, because the breaker has to notice a
+// loss taken minutes ago — including one realised by a cron-side square-off that this tab
+// never saw. Failures leave the previous value in place; they must not silently reset the
+// breaker to "no loss today".
+const DAILY_RISK_URL = '/signals/api/proxy.php?action=daily_risk';
+const DAILY_RISK_TTL = 60000;
+let _dailyRisk = null;
+let _dailyRiskAt = 0;
+let _dailyRiskInflight = null;
+
+async function godFetchDailyRisk(force = false) {
+  if (!force && _dailyRisk && Date.now() - _dailyRiskAt < DAILY_RISK_TTL) return _dailyRisk;
+  if (_dailyRiskInflight) return _dailyRiskInflight;
+  _dailyRiskInflight = (async () => {
+    try {
+      const r = await fetch(DAILY_RISK_URL + '&cb=' + Date.now(), { cache: 'no-store' });
+      const j = await r.json();
+      if (j && j.status && j.daily) { _dailyRisk = j.daily; _dailyRiskAt = Date.now(); }
+    } catch (e) { /* keep the previous figure */ }
+    _dailyRiskInflight = null;
+    return _dailyRisk;
+  })();
+  return _dailyRiskInflight;
+}
+
 /** Debounced — called on every processed signal, so batch the writes. */
 function godSaveState() { // eslint-disable-line no-unused-vars
   if (!_godLeaseOwner) return;
@@ -172,8 +198,23 @@ class PatternMemory {
     record.pnl_pct = pnl_pct;
     record.move_atr = move_atr;
     record.duration_min = duration_min;
-    this._save();
     this._learnFromOutcome(record);
+
+    // Persist through the MERGE endpoint, not only through the snapshot save.
+    //
+    // _save() -> godSaveState() returns early unless this tab owns the executor lease, so
+    // a desk tab without it would mutate memory here and write nothing — the outcome simply
+    // evaporated on reload. That is provable in the live data: the one virtual trade
+    // carrying a patternId matched a stored pattern whose outcome was still null. Labelling
+    // a pattern only merges one record and cannot clobber another writer, so it does not
+    // need the lease and must not be gated on it. _save() is still called for the tab that
+    // does hold the lease, which keeps the rest of the snapshot current.
+    postJSON(`${PROXY}?action=god_outcome`, {
+      patternId: String(id), outcome, pnlPct: pnl_pct,
+      moveAtr: move_atr, durationMin: duration_min, closedBy: 'browser',
+    }).catch(() => {});
+
+    this._save();
     return true;
   }
 
@@ -591,6 +632,10 @@ class RiskShield {
     this.dailyPnL = 0;
     this.dailySignals = 0;
     this.dailyStops = 0;
+    // Populated from ?action=daily_risk. Null means "not yet known", which is deliberately
+    // distinct from "zero loss today" — the breaker must not be evaluated against a figure
+    // it has not actually loaded.
+    this.dailyRisk = null;
   }
 
   // #28: Breakeven Acceleration
@@ -648,8 +693,35 @@ class RiskShield {
   }
 
   // #34: Max Daily Loss Limit
-  checkDailyLimit(capital = 20000) {
-    return this.dailyPnL < -(capital * 0.04); // 4% daily loss = stop
+  /**
+   * Daily-loss circuit breaker.
+   *
+   * This used to read `this.dailyPnL`, which starts at 0 and is only mutated by
+   * closeTrade() — a method with no callers anywhere. So it compared 0 against the limit on
+   * every signal and returned false permanently: a hard risk stop that could never fire,
+   * while the UI reported it as active protection. The capital default was a hardcoded
+   * 20000 as well, against a desk that actually runs 100000, so the threshold was five
+   * times tighter than intended had it ever worked.
+   *
+   * It now uses server-derived REALISED P&L from the trade log (?action=daily_risk), which
+   * survives reloads, is shared across tabs, and includes positions closed by cron — none
+   * of which per-tab memory could do. If that figure has not been fetched yet it falls back
+   * to the in-memory value rather than inventing a breach.
+   */
+  checkDailyLimit(capital = null) {
+    if (this.dailyRisk && typeof this.dailyRisk.breached === 'boolean') return this.dailyRisk.breached;
+    const base = capital || this.dailyRisk?.capital || 100000;
+    return this.dailyPnL < -(base * 0.04);
+  }
+
+  /** Feed in the server-derived figures. */
+  setDailyRisk(dr) {
+    if (dr && typeof dr === 'object') {
+      this.dailyRisk = dr;
+      if (typeof dr.realisedPnl === 'number') this.dailyPnL = dr.realisedPnl;
+      if (typeof dr.stops === 'number') this.dailyStops = dr.stops;
+      if (typeof dr.trades === 'number') this.dailySignals = dr.trades;
+    }
   }
 
   // #35: Position Size Calculator (Half-Kelly)
@@ -685,7 +757,14 @@ class RiskShield {
   getStreakInfo() {
     const recent = this.activeTrades ? Object.values(this.activeTrades) : [];
     // Load from pattern memory
-    return { dailySignals: this.dailySignals, dailyStops: this.dailyStops, dailyPnL: this.dailyPnL };
+    return { dailySignals: this.dailySignals, dailyStops: this.dailyStops, dailyPnL: this.dailyPnL,
+             // Surfaced so the UI can distinguish "no loss today" from "never loaded", and
+             // show how much room is left before the stop rather than only a boolean.
+             dailyRiskKnown: !!this.dailyRisk,
+             capital: this.dailyRisk?.capital ?? null,
+             lossLimitAmount: this.dailyRisk?.lossLimitAmount ?? null,
+             remainingBeforeHalt: this.dailyRisk?.remainingBeforeHalt ?? null,
+             breached: this.dailyRisk?.breached ?? null };
   }
 
   startTrade(id, entry) {
@@ -1034,7 +1113,13 @@ class GodBrain {
     gm.positionSize = rawSignal.direction !== 'NO_TRADE'
       ? this.risk.calculatePositionSize(gm.godConfidence, gm.premiumCeiling?.maxPremium || 20, snapshot.lotSize || 75)
       : null;
+    // Kick a refresh (non-blocking) and evaluate the breaker on whatever the server last
+    // reported. Deliberately not awaited: a slow request must not stall signal rendering,
+    // and the TTL means the figure is at most a minute old.
+    godFetchDailyRisk().then(dr => { if (dr) this.risk.setDailyRisk(dr); }).catch(() => {});
+    if (_dailyRisk) this.risk.setDailyRisk(_dailyRisk);
     gm.dailyLimit = this.risk.checkDailyLimit();
+    gm.dailyRisk = _dailyRisk || null;
     gm.streakInfo = this.risk.getStreakInfo();
     gm.timeExit = this.risk.checkTimeExit(dte);
 
@@ -1095,7 +1180,19 @@ class GodBrain {
     gm.verdict = this._buildVerdict(rawSignal, gm);
 
     // ── Record in pattern memory ──
-    if (persist && (rawSignal.direction !== 'NO_TRADE' || gm.godConfidence >= 40)) {
+    // Only record patterns that can ever be LABELLED.
+    //
+    // This used to also store NO_TRADE observations whose conviction cleared 40, and they
+    // accumulated to 194 of 425 records — 46% of the store — while being structurally
+    // incapable of ever receiving an outcome: a NO_TRADE never becomes a position, and
+    // findSimilar()/getCalibration() only consider completed records. So they contributed
+    // nothing to learning while consuming the capped store and, under the old blind
+    // tail-slice eviction, actively displacing the handful of real outcomes.
+    //
+    // Observational history is still kept — it moved to the confirmed-signal log
+    // (?action=signal_log), which is the right home for "what did we see" as opposed to
+    // "what did we learn". This store is now strictly the outcome-learning corpus.
+    if (persist && rawSignal.direction !== 'NO_TRADE') {
       const recId = this.memory.record({
         instrument: rawSignal.symbol,
         direction: rawSignal.direction,

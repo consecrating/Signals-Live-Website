@@ -140,6 +140,44 @@
     const BRAIN_URL = 'https://ads.sanctify.co.in/signals/api/proxy.php?action=brain_ingest';
     const _ingestSeen = {};     // dedup key -> last ts (ms)
     const _presignalSent = {};  // symbol|direction -> last pre-signal attempt (ms)
+    // ── Confirmed-signal log (permanent, date + IST time wise) ───────────────
+    // Separate from ingestToBrain() on purpose. That stream is telemetry: every
+    // instrument, every 30 seconds, ~96% NO_TRADE — useful for pattern statistics, useless
+    // for reading back what the system actually called and when. This writes one row per
+    // confirmed signal, with the desk's decision attached, and is deduplicated server-side
+    // on patternId so the refresh loop cannot spam it.
+    const SIGNAL_LOG_URL = '/signals/api/proxy.php?action=signal_log';
+    async function logConfirmedSignal(sig, snap, gm, ptResult) {
+      try {
+        if (!sig || sig.direction === 'NO_TRADE') return;
+        const trade = sig.optionTrade || sig.watchTrade || null;
+        await postJSON(SIGNAL_LOG_URL, {
+          ts: Date.now(),
+          instrument: sig.symbol,
+          direction: sig.direction,
+          optionType: trade?.type ?? (sig.direction === 'BUY' ? 'CE' : 'PE'),
+          strike: trade?.strike ?? sig.optionStrategy?.strike ?? null,
+          spot: sig.ltp ?? null,
+          premium: trade?.entryPremium ?? null,
+          expiry: trade?.expiry ?? null,
+          confidence: sig._rawConfidence ?? sig.confidence ?? null,
+          netScore: sig.netScore ?? null,
+          agreement: sig.agreement ?? null,
+          adx: sig.strategy?.adx ?? null,
+          rsi: sig.rsi ?? null,
+          regime: sig.strategy?.regime ?? null,
+          godConfidence: gm?.godConfidence ?? null,
+          adaptiveThreshold: gm?.adaptiveThreshold ?? null,
+          godActionable: gm?.actionable ?? null,
+          calibrated: gm?.calibration?.available ?? false,
+          deskDecision: ptResult ? (ptResult.executed ? 'OPENED' : 'REFUSED') : null,
+          deskReason: ptResult?.reason ?? null,
+          patternId: gm?.patternId ?? sig._patternId ?? null,
+          source: 'browser',
+        });
+      } catch (e) { /* logging must never break the signal path */ }
+    }
+
     async function ingestToBrain(symbol, snap, sig) {
       // DEDUP: the page re-scores every 10s. Without this, one unchanged setup gets
       // written dozens of times and the brain counts each copy as an independent
@@ -713,6 +751,15 @@
           } else if (ptResult.shadowRecorded) {
             console.log(`[PaperTrade] Shadow recorded: ${ptResult.reason}`);
           }
+
+          // Permanent, date-wise record of this confirmed signal.
+          //
+          // Logged HERE rather than at render time because this is the first point where
+          // the desk's decision is actually known — a log that recorded the call without
+          // recording whether the system acted on it would answer the less useful half of
+          // the question. Confirmed signals only; NO_TRADE is telemetry and stays in the
+          // ingest stream.
+          logConfirmedSignal(sig, snap, gm, ptResult);
 
           // Active positions were already requoted above by exact contract. The
           // current signal quote is not reused for unrelated positions.

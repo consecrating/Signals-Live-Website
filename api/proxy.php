@@ -347,6 +347,8 @@ $SYMBOL_TOKENS = [
 // God Mode safety kernel: state machine, guardrails, audit log, skill registry.
 // Loaded after the paper-budget constants it depends on.
 require_once __DIR__ . '/kernel.php';
+require_once __DIR__ . '/godstate.php';
+require_once __DIR__ . '/signallog.php';
 
 $action = $_GET['action'] ?? '';
 
@@ -466,6 +468,26 @@ switch ($action) {
 
     case 'god_state':
         handleGodState();
+        break;
+
+    // Outcome labelling is separated from snapshot writing on purpose — see the header of
+    // api/godstate.php. A snapshot POST replaces everything and is therefore fenced behind
+    // the executor lease; labelling one pattern only merges, so it cannot clobber and must
+    // NOT depend on which tab happens to hold the lease. That dependency is precisely how
+    // realised outcomes were being lost.
+    case 'god_outcome':
+        handleGodOutcome();
+        break;
+
+    // Daily-loss circuit breaker state, derived from the trade log rather than from
+    // per-tab in-memory counters that reset on reload and never saw server-side closes.
+    case 'daily_risk':
+        echo json_encode(['status' => true, 'daily' => gs_daily_risk()]);
+        break;
+
+    // Permanent, date-wise record of confirmed signals. See api/signallog.php.
+    case 'signal_log':
+        handleSignalLog();
         break;
 
     default:
@@ -2530,6 +2552,11 @@ function handlePaperTrades() {
             'gex'           => $data['gex'] ?? '',
             'slippage'      => (float)($data['slippage'] ?? 0),
             'lotSize'       => (int)($data['lotSize'] ?? 0),
+            // The link back to the God Mode pattern this trade came from. It was absent, so
+            // a paper trade could never be reconciled against the pattern store — the
+            // outcome existed in the trade log and the pattern stayed unlabelled forever,
+            // with nothing to join them. The virtual desk already carried it; paper did not.
+            'patternId'     => isset($data['patternId']) ? (string)$data['patternId'] : null,
         ];
 
         $file = $dir . '/trades.jsonl';
@@ -3078,6 +3105,91 @@ function handleVirtualState() {
  * storage made the brain per-device, so a phone and a laptop each learned their
  * own separate history and the dashboard showed different numbers on each.
  */
+/**
+ * POST ?action=god_outcome  {patternId, outcome, pnlPct, moveAtr?, durationMin?, closedBy?}
+ * GET  ?action=god_outcome  -> loop health counters
+ *
+ * Deliberately NOT fenced behind the executor lease. See api/godstate.php for the full
+ * reasoning: this is a merge that labels a single pattern, so it cannot erase another
+ * writer's state, and making it lease-dependent is what silently discarded outcomes from
+ * any desk tab that did not happen to own the lease.
+ *
+ * The GET side exists so "is the loop actually closing?" has a definite answer, broken down
+ * by which closer recorded each outcome — browser or cron.
+ */
+function handleGodOutcome() {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        echo json_encode(['status' => true, 'loop' => gs_outcome_stats()]);
+        return;
+    }
+    // Still authenticated and rate-limited: it mutates the learning store.
+    requireWriteAuth('god_outcome', 120, 60);
+
+    $b = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($b)) { echo json_encode(['status' => false, 'error' => 'Invalid body']); return; }
+
+    $res = gs_record_outcome(
+        $b['patternId']   ?? null,
+        $b['outcome']     ?? null,
+        $b['pnlPct']      ?? null,
+        $b['moveAtr']     ?? null,
+        $b['durationMin'] ?? null,
+        $b['closedBy']    ?? 'browser'
+    );
+
+    if (!empty($res['ok'])) {
+        auditLog('order', 'god_outcome_recorded', [
+            'patternId' => (string)($b['patternId'] ?? ''),
+            'outcome' => (string)($b['outcome'] ?? ''),
+            'completedTotal' => $res['completedTotal'] ?? null,
+            'by' => (string)($b['closedBy'] ?? 'browser'),
+        ]);
+    }
+    echo json_encode(['status' => !empty($res['ok'])] + $res + ['loop' => gs_outcome_stats()]);
+}
+
+/**
+ * GET  ?action=signal_log[&date=YYYY-MM-DD]   -> one day's confirmed signals + summary
+ * GET  ?action=signal_log&dates=1             -> just the list of days that have a log
+ * POST ?action=signal_log                     -> append one confirmed signal
+ *
+ * Read is open like every other read endpoint here; the write is authenticated and rate
+ * limited. Outcomes are joined in at read time from the pattern store, so a label recorded
+ * hours after the signal appears here without the append-only file ever being rewritten.
+ */
+function handleSignalLog() {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        requireWriteAuth('signal_log', 120, 60);
+        $b = json_decode(file_get_contents('php://input'), true);
+        if (!is_array($b)) { echo json_encode(['status' => false, 'error' => 'Invalid body']); return; }
+        $res = sl_append($b);
+        echo json_encode(['status' => !empty($res['ok'])] + $res);
+        return;
+    }
+
+    if (($_GET['dates'] ?? '') === '1') {
+        echo json_encode(['status' => true, 'dates' => sl_dates()]);
+        return;
+    }
+
+    $dates = sl_dates();
+    $date = $_GET['date'] ?? ($dates[0] ?? sl_ist_parts()['date']);
+    if (!sl_valid_date($date)) { echo json_encode(['status' => false, 'error' => 'Bad date']); return; }
+
+    $r = sl_read($date);
+    echo json_encode([
+        'status'  => true,
+        'date'    => $date,
+        'dates'   => $dates,
+        'rows'    => $r['rows'],
+        'summary' => sl_summary($r['rows']),
+        'note'    => 'One row per confirmed signal, IST-stamped, deduplicated on patternId. '
+                   . 'Outcomes are joined from the God Mode pattern store at read time. '
+                   . 'Rows with source=server-cron were generated with no browser open and '
+                   . 'did NOT evaluate God Mode conviction or live-quote gates.',
+    ]);
+}
+
 function handleGodState() {
     $dir = __DIR__ . '/../brain-data';
     if (!is_dir($dir)) @mkdir($dir, 0755, true);
@@ -3111,9 +3223,53 @@ function handleGodState() {
             return;
         }
 
-        // Cap pattern history so this file cannot grow without bound.
+        // Cap pattern history so this file cannot grow without bound — but evict with a
+        // preference for KEEPING labelled records.
+        //
+        // This was `array_slice(-500)`, which silently destroyed evidence twice over. It
+        // disagreed with the client's own MAX_PATTERN_RECORDS of 2000, so the server threw
+        // away three quarters of what the browser believed it had stored; and being a blind
+        // tail-slice it evicted completed outcomes — 5 in the entire live store — to make
+        // room for pending ones, 46% of which are NO_TRADE observations that can never be
+        // labelled at all. gs_prune_patterns() keeps completed records first and trims only
+        // pending ones, oldest first, at the client's own limit.
         if (isset($data['patterns']) && is_array($data['patterns'])) {
-            $data['patterns'] = array_slice($data['patterns'], -500);
+            $data['patterns'] = gs_prune_patterns($data['patterns'], GS_MAX_PATTERNS);
+        }
+
+        // A snapshot must never blank out an outcome that a merge-write (cron, or another
+        // desk tab) recorded while this tab was holding a stale copy in memory. Replay the
+        // on-disk labels over the incoming snapshot before it lands.
+        $existing = gs_read();
+        if ($existing && !empty($existing['patterns']) && is_array($existing['patterns'])
+            && isset($data['patterns']) && is_array($data['patterns'])) {
+            $labels = [];
+            foreach ($existing['patterns'] as $p) {
+                if (!empty($p['outcome'])) $labels[(string)($p['id'] ?? ($p['ts'] ?? ''))] = $p;
+            }
+            if ($labels) {
+                foreach ($data['patterns'] as $i => $p) {
+                    $k = (string)($p['id'] ?? ($p['ts'] ?? ''));
+                    if (isset($labels[$k]) && empty($p['outcome'])) {
+                        $data['patterns'][$i]['outcome']      = $labels[$k]['outcome'];
+                        $data['patterns'][$i]['pnl_pct']      = $labels[$k]['pnl_pct'] ?? null;
+                        $data['patterns'][$i]['move_atr']     = $labels[$k]['move_atr'] ?? null;
+                        $data['patterns'][$i]['duration_min'] = $labels[$k]['duration_min'] ?? null;
+                        $data['patterns'][$i]['closed_by']    = $labels[$k]['closed_by'] ?? 'unknown';
+                        $data['patterns'][$i]['closed_at']    = $labels[$k]['closed_at'] ?? null;
+                    }
+                }
+            }
+            // Same for the learning counter, which only ever moves forward.
+            $incoming = (int)($data['learnings']['totalAnalyzed'] ?? 0);
+            $onDisk   = (int)($existing['learnings']['totalAnalyzed'] ?? 0);
+            if ($onDisk > $incoming) {
+                if (!isset($data['learnings']) || !is_array($data['learnings'])) $data['learnings'] = [];
+                $data['learnings']['totalAnalyzed'] = $onDisk;
+                if (!empty($existing['learnings']['weights'])) {
+                    $data['learnings']['weights'] = $existing['learnings']['weights'];
+                }
+            }
         }
         $data['updatedAt'] = date('c');
 

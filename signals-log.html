@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Signal Log — Confirmed Signals by Date</title>
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=2">
+  <link rel="apple-touch-icon" href="favicon.svg?v=2">
+  <meta name="theme-color" content="#0a0e17">
+  <script src="js/core/mobile-nav.js" defer></script>
+  <style>
+    :root { --gm-bd:#1f2937; --gm-bg:#0d1420; }
+    .gm-card { background:var(--gm-bg); border:1px solid var(--gm-bd); border-radius:11px; padding:0.9rem 1rem; }
+    .gm-card h3 { font-size:0.78rem; text-transform:uppercase; letter-spacing:0.08em; color:#93a4bd;
+      margin:0 0 0.7rem; display:flex; align-items:center; gap:0.5rem; justify-content:space-between; flex-wrap:wrap; }
+    .sl-controls { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; margin-bottom:0.8rem; }
+    .sl-controls select, .sl-controls input {
+      background:#0a0e17; color:#e5e7eb; border:1px solid var(--gm-bd); border-radius:7px;
+      padding:0.42rem 0.6rem; font-size:0.8rem; font-family:inherit; }
+    .sl-btn { font-size:0.72rem; font-weight:700; padding:0.44rem 0.8rem; border-radius:7px; cursor:pointer;
+      background:rgba(16,185,129,0.14); color:#34d399; border:1px solid rgba(16,185,129,0.4); }
+    .sl-btn:hover { background:rgba(16,185,129,0.22); }
+    .sl-chip { display:inline-block; font-size:0.66rem; font-weight:700; padding:0.2rem 0.5rem;
+      border-radius:5px; background:rgba(148,163,184,0.12); border:1px solid var(--gm-bd); color:#93a4bd; }
+    .sl-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    table.sl { width:100%; border-collapse:collapse; font-size:0.76rem; min-width:940px; }
+    table.sl th { text-align:left; font-size:0.63rem; text-transform:uppercase; letter-spacing:0.06em;
+      color:#8b98ad; font-weight:700; padding:0.45rem 0.55rem; border-bottom:1px solid var(--gm-bd);
+      position:sticky; top:0; background:var(--gm-bg); }
+    table.sl td { padding:0.45rem 0.55rem; border-bottom:1px dashed rgba(31,41,55,0.65);
+      font-variant-numeric:tabular-nums; white-space:nowrap; }
+    table.sl tr:hover td { background:rgba(148,163,184,0.045); }
+    .dir-BUY { color:#34d399; font-weight:800; }
+    .dir-SELL { color:#f87171; font-weight:800; }
+    .src-browser { color:#93a4bd; } .src-cron { color:#a78bfa; }
+    .oc-win { color:#34d399; font-weight:700; } .oc-loss { color:#f87171; font-weight:700; }
+    .muted-sm { font-size:0.7rem; color:#6b7a90; }
+    .sl-note { font-size:0.72rem; color:#8a6d3b; background:rgba(245,158,11,0.09);
+      border:1px solid rgba(245,158,11,0.3); border-radius:6px; padding:0.55rem 0.7rem; margin-top:0.7rem; }
+    .sl-empty { text-align:center; color:#6b7a90; font-size:0.8rem; padding:2rem 1rem; }
+  </style>
+</head>
+<body>
+  <div class="risk-banner">RISK WARNING: F&amp;O trading involves substantial risk of capital loss. Not financial advice.</div>
+  <nav class="navbar">
+    <div class="navbar-brand"><div class="logo-icon">S</div><span>FNO Signal Pro</span></div>
+    <ul class="nav-links">
+      <li><a href="live.html">Dashboard</a></li>
+      <li><a href="signal.html">Signals</a></li>
+      <li><a href="chain.html">Option Chain</a></li>
+      <li><a href="scan.html">Scanner</a></li>
+      <li><a href="chart.html">Charts</a></li>
+      <li><a href="tool.html">Paper Trade</a></li>
+      <li><a href="virtual.html" style="color:#c4b5fd">Virtual Trade</a></li>
+      <li><a href="god-dashboard.html" style="color:#a78bfa">God Mode</a></li>
+      <li><a href="signals-log.html" class="active" style="color:#38bdf8;background:rgba(56,189,248,0.12)">Signal Log</a></li>
+    </ul>
+    <div class="nav-status"><div id="mkt" class="market-status-badge open"><span class="status-dot"></span><span id="mkt-t">…</span></div></div>
+  </nav>
+
+  <main class="page-container" style="padding-bottom:8rem">
+    <section class="gm-card">
+      <h3>
+        <span>Confirmed Signal Log</span>
+        <span id="sl-count" class="sl-chip">…</span>
+      </h3>
+
+      <div class="sl-controls">
+        <label class="muted-sm" for="sl-date">Date</label>
+        <select id="sl-date"></select>
+        <button id="sl-prev" class="sl-btn" type="button">‹ Older</button>
+        <button id="sl-next" class="sl-btn" type="button">Newer ›</button>
+        <button id="sl-refresh" class="sl-btn" type="button">Refresh</button>
+        <label class="muted-sm" for="sl-inst" style="margin-left:0.4rem">Instrument</label>
+        <select id="sl-inst"><option value="">All</option></select>
+        <label class="muted-sm" for="sl-dir">Direction</label>
+        <select id="sl-dir">
+          <option value="">All</option><option value="BUY">BUY</option><option value="SELL">SELL</option>
+        </select>
+        <button id="sl-csv" class="sl-btn" type="button">Export CSV</button>
+      </div>
+
+      <div id="sl-summary" class="muted-sm" style="margin-bottom:0.6rem"></div>
+
+      <div class="sl-wrap">
+        <table class="sl">
+          <thead>
+            <tr>
+              <th>Time (IST)</th><th>Instrument</th><th>Dir</th><th>Strike</th>
+              <th>Spot</th><th>Conf</th><th>Reversion</th><th>ADX</th><th>RSI</th>
+              <th>Regime</th><th>God</th><th>Desk</th><th>Outcome</th><th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="sl-body"></tbody>
+        </table>
+      </div>
+      <div id="sl-empty" class="sl-empty" hidden></div>
+
+      <div class="sl-note" id="sl-disclaimer"></div>
+    </section>
+  </main>
+
+<script type="module">
+  const API = '/signals/api/proxy.php?action=signal_log';
+  const $ = id => document.getElementById(id);
+  const nf = n => (n == null || n === '' || Number.isNaN(Number(n))) ? '—'
+    : Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+
+  let _rows = [], _dates = [], _date = null;
+
+  // Market clock in the navbar, matching the other pages.
+  function tickClock() {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const m = ist.getHours() * 60 + ist.getMinutes();
+    const wd = ist.getDay() >= 1 && ist.getDay() <= 5;
+    const open = wd && m >= 555 && m <= 930;
+    const b = $('mkt'); if (!b) return;
+    b.className = 'market-status-badge ' + (open ? 'open' : 'closed');
+    $('mkt-t').textContent = (open ? 'Market Open' : 'Market Closed') + ' · '
+      + ist.toLocaleTimeString('en-IN', { hour12: false });
+  }
+  tickClock(); setInterval(tickClock, 1000);
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  async function load(date) {
+    const url = API + (date ? '&date=' + encodeURIComponent(date) : '') + '&cb=' + Date.now();
+    const r = await fetch(url, { cache: 'no-store' });
+    const j = await r.json();
+    if (!j || !j.status) throw new Error(j && j.error ? j.error : 'Failed to load');
+    _rows = j.rows || [];
+    _dates = j.dates || [];
+    _date = j.date;
+    $('sl-disclaimer').innerHTML = esc(j.note || '');
+    renderDates();
+    renderInstruments();
+    render();
+  }
+
+  // IST calendar date, computed without a round-trip through the browser's own timezone.
+  //
+  // The obvious `new Date(d.toLocaleString('en-US',{timeZone:'Asia/Kolkata'})).toISOString()`
+  // is wrong twice over: it re-parses an IST wall-clock string as if it were browser-local
+  // time, then converts back to UTC. On a viewer west of IST that shifts the day backwards —
+  // it was labelling 10 Sep as "Wed, 09 Sept". A log whose entire purpose is to be read
+  // date-wise cannot afford an off-by-one-day depending on where it is opened from.
+  const istDateOf = dt => new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(dt);
+
+  function istLabel(ymd) {
+    // Formatted AS IST, so the weekday and day-of-month always match the file's own date.
+    return new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short',
+      day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(ymd + 'T06:00:00+05:30'));
+  }
+
+  function renderDates() {
+    const sel = $('sl-date');
+    // If a day has no rows yet it will not appear in `dates` (the file is created on first
+    // write), so today is offered explicitly rather than leaving the picker empty.
+    const today = istDateOf(new Date());
+    const all = [...new Set([...(_dates || []), _date, today].filter(Boolean))].sort().reverse();
+    sel.innerHTML = all.map(d =>
+      `<option value="${d}"${d === _date ? ' selected' : ''}>${istLabel(d)}${d === today ? ' · today' : ''}</option>`
+    ).join('');
+    const i = all.indexOf(_date);
+    $('sl-prev').disabled = !(i > -1 && i < all.length - 1);
+    $('sl-next').disabled = !(i > 0);
+  }
+
+  function renderInstruments() {
+    const sel = $('sl-inst');
+    const cur = sel.value;
+    const names = [...new Set(_rows.map(r => r.instrument).filter(Boolean))].sort();
+    sel.innerHTML = '<option value="">All</option>'
+      + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    sel.value = names.includes(cur) ? cur : '';
+  }
+
+  function filtered() {
+    const inst = $('sl-inst').value, dir = $('sl-dir').value;
+    return _rows.filter(r => (!inst || r.instrument === inst) && (!dir || r.direction === dir));
+  }
+
+  function render() {
+    const rows = filtered();
+    const body = $('sl-body');
+    $('sl-count').textContent = rows.length + (rows.length === 1 ? ' signal' : ' signals');
+
+    if (!rows.length) {
+      body.innerHTML = '';
+      const e = $('sl-empty');
+      e.hidden = false;
+      e.innerHTML = _rows.length
+        ? 'No signals match this filter.'
+        : 'No confirmed signals recorded for this date.<div class="muted-sm" style="margin-top:0.4rem">'
+          + 'This is normal on a low-conviction day — the engine requires ADX ≥ 25 and a reversion '
+          + 'score between ±30 and ±50, and stands down otherwise.</div>';
+    } else {
+      $('sl-empty').hidden = true;
+      body.innerHTML = rows.map(r => {
+        const god = r.godConfidence == null ? '<span class="muted-sm">not evaluated</span>'
+          : `${Math.round(r.godConfidence)}%`
+            + (r.adaptiveThreshold != null ? `<span class="muted-sm"> / ${Math.round(r.adaptiveThreshold)}</span>` : '')
+            + (r.godActionable === false ? ' <span class="muted-sm">(below bar)</span>' : '');
+        const desk = r.deskDecision === 'OPENED'
+          ? '<span class="dir-BUY">OPENED</span>'
+          : r.deskDecision === 'REFUSED'
+            ? `<span style="color:#fbbf24">REFUSED</span>`
+            : '<span class="muted-sm">—</span>';
+        const oc = r.outcome
+          ? `<span class="${Number(r.outcomePnlPct) > 0 ? 'oc-win' : 'oc-loss'}">${esc(r.outcome)}`
+            + (r.outcomePnlPct != null ? ` ${Number(r.outcomePnlPct) > 0 ? '+' : ''}${nf(r.outcomePnlPct)}%` : '')
+            + '</span>'
+          : '<span class="muted-sm">open / unlabelled</span>';
+        return `<tr title="${esc(r.deskReason || '')}">
+          <td>${esc(r.istTime)}</td>
+          <td><b>${esc(r.instrument)}</b></td>
+          <td class="dir-${esc(r.direction)}">${esc(r.direction)}</td>
+          <td>${nf(r.strike)}${r.optionType ? ' ' + esc(r.optionType) : ''}</td>
+          <td>${nf(r.spot)}</td>
+          <td>${r.confidence == null ? '—' : Math.round(r.confidence) + '%'}</td>
+          <td>${nf(r.netScore)}</td>
+          <td>${r.adx == null ? '—' : Math.round(r.adx)}</td>
+          <td>${r.rsi == null ? '—' : Number(r.rsi).toFixed(1)}</td>
+          <td>${esc(r.regime || '—')}</td>
+          <td>${god}</td>
+          <td>${desk}</td>
+          <td>${oc}</td>
+          <td class="${r.source === 'server-cron' ? 'src-cron' : 'src-browser'}">${esc(r.source || '—')}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Summary line. Deliberately descriptive: a win rate over a handful of labelled rows
+    // would read as a performance claim the data cannot support.
+    const withOc = rows.filter(r => r.outcome);
+    const wins = withOc.filter(r => Number(r.outcomePnlPct) > 0).length;
+    const opened = rows.filter(r => r.deskDecision === 'OPENED').length;
+    const bySrc = rows.reduce((a, r) => (a[r.source] = (a[r.source] || 0) + 1, a), {});
+    $('sl-summary').innerHTML = rows.length
+      ? `<b>${rows.length}</b> confirmed · ${rows.filter(r => r.direction === 'BUY').length} BUY / `
+        + `${rows.filter(r => r.direction === 'SELL').length} SELL · desk opened <b>${opened}</b> · `
+        + `labelled <b>${withOc.length}</b>${withOc.length ? ` (${wins} up, ${withOc.length - wins} down)` : ''} · `
+        + Object.entries(bySrc).map(([k, v]) => `${k} ${v}`).join(' · ')
+        + (withOc.length && withOc.length < 20
+            ? ` <span class="muted-sm">— too few labelled outcomes to infer a hit rate</span>` : '')
+      : '';
+  }
+
+  function toCSV() {
+    const rows = filtered();
+    const cols = ['istDate', 'istTime', 'instrument', 'direction', 'strike', 'optionType', 'spot',
+      'premium', 'confidence', 'netScore', 'agreement', 'adx', 'rsi', 'regime', 'godConfidence',
+      'adaptiveThreshold', 'godActionable', 'deskDecision', 'deskReason', 'outcome',
+      'outcomePnlPct', 'holdMinutes', 'closedBy', 'source', 'patternId'];
+    const q = v => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const csv = [cols.join(','), ...rows.map(r => cols.map(c => q(r[c])).join(','))].join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `confirmed-signals-${_date || 'export'}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  function shiftDate(step) {
+    const all = [...$('sl-date').options].map(o => o.value);
+    const i = all.indexOf(_date);
+    const j = i + step;
+    if (j >= 0 && j < all.length) load(all[j]).catch(showErr);
+  }
+
+  function showErr(e) {
+    $('sl-body').innerHTML = '';
+    const el = $('sl-empty');
+    el.hidden = false;
+    el.textContent = 'Could not load the signal log: ' + (e && e.message ? e.message : e);
+  }
+
+  $('sl-date').addEventListener('change', e => load(e.target.value).catch(showErr));
+  $('sl-prev').addEventListener('click', () => shiftDate(1));   // older = further down the list
+  $('sl-next').addEventListener('click', () => shiftDate(-1));
+  $('sl-refresh').addEventListener('click', () => load(_date).catch(showErr));
+  $('sl-inst').addEventListener('change', render);
+  $('sl-dir').addEventListener('change', render);
+  $('sl-csv').addEventListener('click', toCSV);
+
+  load(new URLSearchParams(location.search).get('date')).catch(showErr);
+  // Refresh while the market is open so the day's log fills in without a manual reload.
+  setInterval(() => {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const m = ist.getHours() * 60 + ist.getMinutes();
+    if (ist.getDay() >= 1 && ist.getDay() <= 5 && m >= 555 && m <= 935) load(_date).catch(() => {});
+  }, 60000);
+</script>
+</body>
+</html>
