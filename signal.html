@@ -587,6 +587,24 @@
           snap.instrumentType = meta.instrumentType;
         }
         if (fii && fii.status && fii.data) snap.fiiFlow = fii.data.fii;
+
+        // India VIX — wired in at last.
+        //
+        // god-mode.js has carried `vix: 6` and `vix_change: 7` in DIM_WEIGHTS and a
+        // dims.vix branch since it was written, but NOTHING ever set snapshot.vix. So the
+        // dimension never materialised, both weights were dead, and every brain_ingest row
+        // recorded `vix: 0` — a real zero, indistinguishable from a genuine reading of zero.
+        // The value was available the whole time: ?action=indices returns INDIAVIX, and
+        // live.html already displays it. Fetched here rather than deleting the dimension,
+        // because volatility regime is genuinely informative for option selection.
+        try {
+          const ix = await fetchJSON(PROXY + '?action=indices');
+          const v = ix?.data?.INDIAVIX;
+          if (v && Number(v.ltp) > 0) {
+            snap.vix = Number(v.ltp);
+            snap.vixChange = Number(v.percentChange ?? 0);
+          }
+        } catch (e) { /* leave vix undefined — absent is honest, 0 is a lie */ }
         if (news && news.status && news.data) snap.newsSentiment = news.data.sentiment;
         snap.mtfBias = mtf;
         if (gexResp && gexResp.status && gexResp.data) {
@@ -828,14 +846,62 @@
       const results = [];
       for (const s of AUTO_INDICES) {
         try {
-          const snap = await buildSnapshot(s, false); // candles only — fast ranking
+          // Rank on the SAME evidence the selected signal is judged on.
+          //
+          // This used to call buildSnapshot(s, false) — candles only. That omits GEX, PCR
+          // and IV, and the options component carries weight 20 of 100, joint-largest in
+          // the model. So every candidate was ranked with a fifth of the model forced to
+          // zero, then the winner was displayed and traded WITH it. The scanner was
+          // choosing on a materially different measurement from the one it then acted on,
+          // which is how a genuinely better instrument could lose to a worse one.
+          const snap = await buildSnapshot(s, false);
           if (!snap) continue;
           snap.mtfBias = await getMTF(s);
+
+          // Fetch the options context so the 20-weight component is real. One extra
+          // request per candidate, tolerated failure: if it does not arrive the candidate
+          // is still ranked, just with the same blind spot as before rather than being
+          // dropped.
+          try {
+            const g = await fetch(`${PROXY}?action=gex&symbol=${s}&cb=${Date.now()}`,
+                                  { cache: 'no-store' }).then(r => r.json());
+            if (g && g.status && g.data) {
+              snap.gex = g.data;
+              if (g.data.pcr > 0) snap.pcr = g.data.pcr;
+              if (g.data.avgIV > 0) snap.iv = g.data.avgIV / 100;
+              if (g.data.dte != null) snap.dte = g.data.dte;
+            }
+          } catch (e) { /* rank without it */ }
+
           const sig = generateSignal(snap, { confidenceThreshold: 60 });
+
+          // And rank on God Mode's own verdict, because that is what gates execution.
+          // Previously pickBest ranked on the raw engine confidence while the desk executed
+          // on godConfidence against a per-regime adaptive threshold — so the scanner could
+          // hand over the best engine score when a different instrument was the only one
+          // God Mode would endorse. rankEvaluate() is side-effect free (see god-mode.js).
+          let gmRank = null;
+          try { gmRank = godBrain.rankEvaluate(sig, snap); } catch (e) {}
+
+          const engineActionable = sig.direction !== 'NO_TRADE';
           const mtfAligned = !snap.mtfBias || (sig.netScore >= 0 ? snap.mtfBias > 0 : snap.mtfBias < 0);
-          const rank = (sig.direction !== 'NO_TRADE' ? 1000 : 0) + sig.confidence
-            + Math.abs(sig.netScore) * 0.1 + (mtfAligned ? 8 : -18);
-          results.push({ symbol: s, rank, actionable: sig.direction !== 'NO_TRADE' });
+
+          // Tiers, so a candidate that can actually be traded always outranks one that
+          // cannot, regardless of how pretty its score is:
+          //   2000  engine confirmed AND God Mode endorses it
+          //   1000  engine confirmed but below God Mode's bar
+          //      0  no engine signal
+          const tier = engineActionable ? (gmRank?.actionable ? 2000 : 1000) : 0;
+          // Within a tier, order by how far conviction clears its own threshold. That is
+          // the system's own quality measure and it is comparable across regimes, whereas
+          // a raw score is not: 60 in Trending clears a 55 bar while 70 in Choppy fails 75.
+          const margin = gmRank ? gmRank.margin : (sig.confidence - 60);
+          const rank = tier + margin + Math.abs(sig.netScore) * 0.1 + (mtfAligned ? 8 : -18);
+
+          results.push({ symbol: s, rank, actionable: engineActionable,
+                         godActionable: !!gmRank?.actionable,
+                         godConfidence: gmRank?.godConfidence ?? null,
+                         threshold: gmRank?.threshold ?? null });
         } catch (e) {}
         await new Promise(f => setTimeout(f, 250));
       }
@@ -850,10 +916,16 @@
         const cur = currentSignal && currentSignal.symbol;
         if (cur) {
           const curR = results.find(r => r.symbol === cur);
-          // Only hold the incumbent if it is actionable AND genuinely close to the best.
-          if (curR && curR.actionable && (results[0].rank - curR.rank) <= 12) chosen = cur;
+          // Hold the incumbent only if it is close AND no challenger has crossed into a
+          // higher tier — a candidate God Mode endorses must never lose to stickiness.
+          const sameTier = curR && (curR.godActionable === results[0].godActionable);
+          if (curR && curR.actionable && sameTier && (results[0].rank - curR.rank) <= 12) chosen = cur;
         }
         sel.value = chosen;
+        console.log('[AutoPick] ' + results.map(r =>
+          `${r.symbol} rank=${r.rank.toFixed(1)}`
+          + (r.godConfidence != null ? ` god=${Math.round(r.godConfidence)}/${Math.round(r.threshold)}` : '')
+          + (r.godActionable ? ' ✓' : '')).join('  ') + `  → ${chosen}`);
       }
       await run(silent);
     };

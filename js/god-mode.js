@@ -406,7 +406,22 @@ class PatternMemory {
     // signal.html ingestToBrain() is now the single writer for brain_ingest.
   }
 
+  /**
+   * Disabled: this wrote rows the reader then discarded.
+   *
+   * It posted a synthetic brain_ingest row with instrument 'GODMODE_LEARNINGS', and
+   * isUsableSignalRecord() in proxy.php rejects exactly that instrument name on read
+   * (proxy.php:2453) as "not observations at all". So every call added a row to the daily
+   * ingest file that nothing could ever read — pure write amplification, and misleading to
+   * anyone inspecting the file. The learning state it was trying to mirror is already
+   * persisted properly in god-state.json via the learnings object.
+   *
+   * Kept as a no-op rather than deleted so the call sites stay honest about what used to
+   * happen here.
+   */
   _syncLearningsToServer() {
+    return; // intentionally does nothing — see above
+    /* eslint-disable no-unreachable */
     try {
       authedFetch(PROXY + '?action=brain_ingest', {
         method: 'POST',
@@ -434,20 +449,56 @@ class PatternMemory {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class VelocityTracker {
+  /**
+   * Rate-of-change tracking, SCOPED PER INSTRUMENT.
+   *
+   * The series used to be keyed by dimension alone: history['pcr'], history['rsi'],
+   * history['day_change']. One GodBrain instance serves every instrument, and the signal
+   * page switches instrument constantly — auto-pick rotates across four indices. So
+   * consecutive samples in a single series routinely came from DIFFERENT instruments, and
+   * getVelocity() returned the difference between, say, MIDCPNIFTY's PCR and NIFTY's PCR
+   * divided by the seconds between two scans. That is not a rate of change of anything.
+   *
+   * It was not harmless. `day_change` is netScore/100, which swings from +0.45 to −0.38
+   * between instruments, so switching alone produced huge apparent velocities.
+   * detectRegimeShift() fires when 4+ dimensions move together, which instrument-switching
+   * satisfies trivially, and that feeds bd.velocity — up to +8 confidence points awarded
+   * for nothing but the scanner moving on. detectDivergences() was similarly comparing one
+   * index's price velocity against another's RSI velocity.
+   *
+   * Scoping is done with a current-instrument prefix rather than by changing every call
+   * site, so getVelocity('pcr') keeps working and simply means "for the instrument being
+   * evaluated". Aggregating methods only walk the active scope.
+   */
   constructor() {
-    this.history = {}; // dimension → [{value, ts}]
+    this.history = {}; // "INSTRUMENT|dimension" → [{value, ts}]
     this.maxHistory = 20;
+    this.scope = '_';
+  }
+
+  /** Called once per evaluation, before any update(), so samples cannot cross instruments. */
+  setScope(instrument) { this.scope = String(instrument || '_').toUpperCase(); }
+
+  _key(dimension) { return this.scope + '|' + dimension; }
+
+  /** [dimension, series] pairs for the ACTIVE instrument only. */
+  _scoped() {
+    const p = this.scope + '|';
+    return Object.entries(this.history)
+      .filter(([k]) => k.startsWith(p))
+      .map(([k, v]) => [k.slice(p.length), v]);
   }
 
   update(dimension, value) {
-    if (!this.history[dimension]) this.history[dimension] = [];
-    this.history[dimension].push({ value, ts: Date.now() });
-    if (this.history[dimension].length > this.maxHistory) this.history[dimension].shift();
+    const k = this._key(dimension);
+    if (!this.history[k]) this.history[k] = [];
+    this.history[k].push({ value, ts: Date.now() });
+    if (this.history[k].length > this.maxHistory) this.history[k].shift();
   }
 
   // #9: Velocity (rate of change per minute)
   getVelocity(dimension) {
-    const h = this.history[dimension];
+    const h = this.history[this._key(dimension)];
     if (!h || h.length < 2) return 0;
     const dt = (h[h.length - 1].ts - h[h.length - 2].ts) / 60000; // minutes
     if (dt <= 0) return 0;
@@ -456,7 +507,7 @@ class VelocityTracker {
 
   // Acceleration (2nd derivative)
   getAcceleration(dimension) {
-    const h = this.history[dimension];
+    const h = this.history[this._key(dimension)];
     if (!h || h.length < 3) return 0;
     const v1 = (h[h.length - 1].value - h[h.length - 2].value);
     const v2 = (h[h.length - 2].value - h[h.length - 3].value);
@@ -484,7 +535,7 @@ class VelocityTracker {
   detectRegimeShift() {
     const velocities = {};
     let bullish = 0, bearish = 0;
-    for (const [dim, h] of Object.entries(this.history)) {
+    for (const [dim, h] of this._scoped()) {
       const vel = this.getVelocity(dim);
       if (Math.abs(vel) > 0.1) {
         velocities[dim] = vel;
@@ -499,7 +550,7 @@ class VelocityTracker {
 
   // #14: Volume Spike Detector
   detectVolumeSpike(currentRatio) {
-    const h = this.history['volume_ratio'];
+    const h = this.history[this._key('volume_ratio')];
     if (!h || h.length < 3) return false;
     const avg = h.slice(-5).reduce((s, x) => s + x.value, 0) / Math.min(5, h.length);
     return currentRatio > avg * 2.5; // 2.5x recent average = spike
@@ -508,7 +559,7 @@ class VelocityTracker {
   // Get fastest moving dimensions (for dashboard)
   getFastestMovers(n = 5) {
     const movers = [];
-    for (const [dim, h] of Object.entries(this.history)) {
+    for (const [dim, h] of this._scoped()) {
       const vel = Math.abs(this.getVelocity(dim));
       if (vel > 0.01) movers.push({ dim, velocity: this.getVelocity(dim), accel: this.getAcceleration(dim) });
     }
@@ -893,7 +944,11 @@ class AlertEngine {
         s.confirmedAt = Date.now();
         return { stage: 3, action: 'CONFIRMED', message: `🟢 CONFIRMED — ${instrument} ${direction}. ENTER NOW.` };
       }
-    } else if (confidence >= 50 && Math.abs(direction !== 'NO_TRADE' || confidence >= 45)) {
+    // Was `Math.abs(direction !== 'NO_TRADE' || confidence >= 45)` — Math.abs of a boolean,
+    // which coerces to 0 or 1 and is then truthy for anything but false. The absolute value
+    // of a comparison is meaningless; it made the condition read as if it were numeric while
+    // actually being `confidence >= 50 && (anything but a false-y OR)`. Written out plainly.
+    } else if (confidence >= 50 && (direction !== 'NO_TRADE' || confidence >= 45)) {
       if (triggerLevel && ltp) {
         const breached = (direction === 'SELL' && ltp <= triggerLevel) || (direction === 'BUY' && ltp >= triggerLevel);
         if (breached && s.stage < 3) {
@@ -1025,6 +1080,86 @@ class GodBrain {
       });
     }
     return _godReadyPromise;
+  }
+
+  /**
+   * Score a candidate for CROSS-INSTRUMENT RANKING, with no side effects.
+   *
+   * Why this exists rather than calling process() four times:
+   * process() mutates shared state — it pushes velocity samples, escalates AlertEngine
+   * stages (which changes the page's scan interval), and records patterns. Running it once
+   * per candidate on every scan would corrupt the velocity series of whichever instrument
+   * was actually being traded and let a rejected candidate drive the refresh rate.
+   *
+   * Why ranking needs God Mode at all:
+   * pickBest() ranked on the raw engine `confidence`, but execution is gated on
+   * godConfidence against a per-regime adaptive threshold. So the scanner could hand over
+   * the instrument with the best engine score while a different one was the only candidate
+   * God Mode would actually endorse — choosing on one measure and acting on another.
+   *
+   * Deliberate simplification, stated rather than hidden: the velocity term is passed as 0
+   * for every candidate. Reading it truthfully would require pushing a sample first, which
+   * is the side effect this method exists to avoid. Passing 0 uniformly keeps candidates
+   * comparable — it can shift an absolute score by up to 8 points but cannot bias the
+   * ORDER, which is all a ranking needs. The selected instrument is then re-evaluated
+   * properly by process(), so nothing is traded on this number.
+   */
+  rankEvaluate(rawSignal, snapshot) {
+    const regime = rawSignal.strategy?.regime || 'Unknown';
+    const gexRegime = snapshot.gex?.regime || '';
+    const gexFlipDist = snapshot.gex?.flip && snapshot.ltp
+      ? (snapshot.ltp - snapshot.gex.flip) / Math.max(1, rawSignal.atr || snapshot.ltp * 0.01)
+      : 999;
+    const htfAligned = rawSignal.strategy?.mtf === 'Bearish' && rawSignal.direction === 'SELL' ||
+                       rawSignal.strategy?.mtf === 'Bullish' && rawSignal.direction === 'BUY' ? true :
+                       rawSignal.strategy?.mtf && rawSignal.strategy.mtf !== 'n/a' ? false : null;
+
+    // Read-only: _buildDimensions and evidence.build do not mutate. Scope is set so any
+    // velocity READ belongs to this candidate rather than to whatever was evaluated last.
+    const prevScope = this.velocity.scope;
+    this.velocity.setScope(rawSignal.symbol || snapshot.symbol);
+    let evidenceQuality = 0;
+    try {
+      const dims = this._buildDimensions(snapshot, rawSignal);
+      const ev = this.evidence.build(dims, rawSignal.direction, rawSignal.netScore || 0);
+      evidenceQuality = (ev.primary?.length || 0) - (ev.counter?.length || 0);
+    } catch (e) { /* ranking must never throw */ }
+    this.velocity.scope = prevScope;
+
+    const fingerprint = this._buildFingerprint(rawSignal, snapshot);
+    const similar = this.memory.findSimilar(fingerprint, rawSignal.direction || 'SELL');
+    const historicalWR = similar.length >= 20
+      ? Math.round(similar.filter(r => r.pnl_pct > 0).length / similar.length * 100) : 0;
+
+    const bd = this.confidence.calculate(
+      rawSignal.netScore || 0, rawSignal.agreement || 0.5,
+      regime, gexRegime, gexFlipDist, htfAligned,
+      evidenceQuality, historicalWR, 0 /* velocity: see note above */
+    );
+    const modelConfidence = bd.final;
+    const calibration = this.memory.getCalibration(rawSignal.direction || 'NO_TRADE', regime, modelConfidence);
+    const godConfidence = calibration.available ? calibration.calibratedScore : modelConfidence;
+
+    // Same adaptive threshold the real decision uses (process(), below).
+    let threshold = 60;
+    if (regime === 'Trending') threshold = 55;
+    else if (regime === 'Choppy') threshold = 75;
+    const dte = snapshot.dte || 5;
+    const expiryDay = dte <= 1;
+    if (expiryDay) threshold = Math.max(threshold, 68);
+
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const istMin = ist.getHours() * 60 + ist.getMinutes();
+    const expiryBlocked = expiryDay && (htfAligned === false || istMin > 885);
+    const timeExit = this.risk.checkTimeExit(dte);
+
+    const actionable = rawSignal.direction !== 'NO_TRADE'
+      && godConfidence >= threshold && !expiryBlocked
+      && !this.risk.checkDailyLimit() && !timeExit.exit;
+
+    return { godConfidence, modelConfidence, threshold, expiryDay, expiryBlocked,
+             calibrated: !!calibration.available, historicalMatches: similar.length,
+             actionable, margin: godConfidence - threshold };
   }
 
   /**
@@ -1217,6 +1352,10 @@ class GodBrain {
   // ── INTERNAL HELPERS ──────────────────────────────────────────────────────
 
   _updateVelocity(snapshot, signal) {
+    // Scope FIRST. Every update and every velocity read below then belongs to this
+    // instrument alone, instead of appending to a series shared with the other three
+    // indices the scanner rotates through.
+    this.velocity.setScope(signal.symbol || snapshot.symbol);
     if (snapshot.pcr) this.velocity.update('pcr', snapshot.pcr);
     if (snapshot.gex?.flip && snapshot.ltp) this.velocity.update('gex_flip_distance', (snapshot.ltp - snapshot.gex.flip) / (signal.atr || 100));
     if (signal.rsi) this.velocity.update('rsi', signal.rsi / 100);
@@ -1256,7 +1395,19 @@ class GodBrain {
     if (snapshot.fiiFlow != null) dims.fii_flow = { normalized: Math.max(-1, Math.min(1, snapshot.fiiFlow / 2000)), finding: `FII ${snapshot.fiiFlow > 0 ? '+' : ''}${snapshot.fiiFlow}` };
 
     // Volatility
-    if (snapshot.vix) dims.vix = { normalized: (snapshot.vix - 15) / 10, finding: `VIX ${snapshot.vix}` };
+    // Volatility regime. Now that snapshot.vix is actually populated (see signal.html),
+    // these two weights are live rather than decorative. Sign convention: rising VIX is
+    // risk-off, so a high or spiking VIX reads bearish.
+    if (snapshot.vix) {
+      dims.vix = { normalized: Math.max(-1, Math.min(1, (snapshot.vix - 15) / 10)),
+                   finding: `India VIX ${Number(snapshot.vix).toFixed(2)}`,
+                   velocity: this.velocity.getVelocity('vix') };
+      if (snapshot.vixChange != null) {
+        dims.vix_change = { normalized: Math.max(-1, Math.min(1, -Number(snapshot.vixChange) / 10)),
+                            finding: `VIX ${Number(snapshot.vixChange) >= 0 ? '+' : ''}`
+                                     + `${Number(snapshot.vixChange).toFixed(2)}% (${Number(snapshot.vixChange) >= 0 ? 'risk-off' : 'risk-on'})` };
+      }
+    }
 
     return dims;
   }

@@ -565,8 +565,24 @@
       // trade. Without this the page shows "NO_TRADE" with no way to tell whether
       // that is a weak setup, an expiry-day threshold, or a halted safety state —
       // which is why "why do I never get a trade?" kept coming up.
+      // Expiry context must be on the snapshot BEFORE God Mode sees it.
+      //
+      // loadTrade() never set snap.dte, and god-mode.js falls back to `snapshot.dte || 5`.
+      // So this dashboard evaluated every instrument as five days from expiry: the expiry-day
+      // threshold and both expiry guards could never engage here, and the blocker text below
+      // could never explain an expiry refusal because dte was always undefined. On expiry day
+      // the page was therefore reporting a laxer gate than the signal page applies.
+      try {
+        const ch = await j(PROXY + '?action=option_chain&symbol=' + sym + bust());
+        const meta = ch?.data?.meta || ch?.meta || null;
+        if (meta?.dte != null) snap.dte = Number(meta.dte);
+        if (meta?.iv != null && Number(meta.iv) > 0) snap.iv = Number(meta.iv);
+      } catch (e) { /* leave unset; God Mode's own default then applies */ }
+
+      // Read-only page: persist:false so browsing the dashboard cannot write pattern
+      // records or duplicate samples the signal page is responsible for.
       let gm = null;
-      try { gm = (godBrain.process(sig, snap) || {}).godMode || null; } catch (e) {}
+      try { gm = (godBrain.process(sig, snap, { persist: false }) || {}).godMode || null; } catch (e) {}
       CTX.trade = { symbol: sym, direction: sig.direction, confidence: sig.confidence,
                     netScore: sig.netScore, vetoes: sig.vetoes || [],
                     regime: sig.strategy?.regime, adx: sig.strategy?.adx, mtf: sig.strategy?.mtf,
@@ -609,7 +625,15 @@
           const dte = snap.dte;
           let why = `God Mode conviction <b>${gc}%</b> is below the <b>${th}%</b> bar for this regime.`;
           if (dte != null && dte <= 1) {
-            why += ` The bar is raised to 80% because this contract is <b>${Number(dte).toFixed(1)} days from expiry</b>`
+            // States the ACTUAL threshold rather than a hardcoded number.
+            //
+            // This said "raised to 80%" while god-mode.js raises it to 68
+            // (Math.max(threshold, 68)). The 80 was left over from an earlier revision and
+            // was never updated, so the page explained a refusal with a figure that
+            // contradicted the number printed beside it — and made the gate look far
+            // stricter than it is. `th` is the real value, so use it.
+            why += ` The bar is raised to <b>${th}%</b> because this contract is`
+                 + ` <b>${Number(dte).toFixed(1)} days from expiry</b>`
                  + ` — at 0-1 DTE premium decays too fast to risk a marginal setup.`;
           }
           blockers.push(['crit', why]);
