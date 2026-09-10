@@ -30,6 +30,13 @@
     .step.done { color:#34d399; border-color:rgba(52,211,153,0.45); background:rgba(16,185,129,0.10); }
     .step.at   { color:#0a0e17; background:#f59e0b; border-color:#f59e0b; }
     .step.bad  { color:#fff; background:#ef4444; border-color:#ef4444; }
+    /* The live state must be unmistakable even at a glance, on any width. */
+    .step.current { color:#0a0e17; background:#10b981; border-color:#10b981; z-index:1;
+      box-shadow:0 0 0 2px rgba(16,185,129,0.35); font-weight:800; }
+    .step.current.bad { background:#ef4444; border-color:#ef4444; color:#fff;
+      box-shadow:0 0 0 2px rgba(239,68,68,0.4); }
+    .step-now { display:block; font-size:0.5rem; letter-spacing:0.12em; opacity:0.85; margin-top:1px; }
+    .sf-now { font-size:0.76rem; margin:-0.4rem 0 0.7rem; color:#93a4bd; }
     .badge-lg { font-size:0.95rem; font-weight:800; padding:0.35rem 0.8rem; border-radius:7px; }
     .finding { font-size:0.72rem; padding:0.42rem 0.6rem; border-radius:6px; margin-top:0.35rem;
       background:rgba(239,68,68,0.09); border:1px solid rgba(239,68,68,0.3); }
@@ -108,6 +115,9 @@
         <span id="sf-badge" class="badge-lg" style="background:#374151;color:#e5e7eb">…</span>
       </h3>
       <div class="pipe" id="sf-pipe"></div>
+      <!-- Restates the live state in words. The chip row above is a state MACHINE: it
+           lists every possible state, so seeing "HALTED" in it means nothing on its own. -->
+      <div id="sf-now" class="sf-now">…</div>
       <div class="gm-grid gm-2">
         <div>
           <div class="kv"><span class="k">Execution permitted</span><span class="v" id="sf-exec">…</span></div>
@@ -340,14 +350,34 @@
                 : s.state === 'UNKNOWN' ? ['#6b7280','#fff'] : ['#f59e0b','#0a0e17'];
       badge.style.background = col[0]; badge.style.color = col[1];
 
+      // Which state are we ACTUALLY in? Previously, when the state was RUNNING every
+      // chip in this row got the same green 'done' styling — so the row read
+      // "UNKNOWN | HALTED | RECONCILING | ..." in identical green, with nothing marking
+      // the live state. The only real indicator was the badge in the header, and on a
+      // narrower viewport that scrolled out of sight. A healthy RUNNING system therefore
+      // looked halted. For a safety panel that is the worst possible failure: it raises
+      // a false alarm, and by the same token it could hide a genuine halt.
+      //
+      // Now the current state is always marked distinctly, whatever it is.
       const at = PIPE.indexOf(s.state);
-      $('sf-pipe').innerHTML = PIPE.map((p,i) => {
+      const isBad = s.state === 'HALTED' || s.state === 'UNKNOWN';
+      $('sf-pipe').innerHTML = PIPE.map((p, i) => {
         let c = 'step';
-        if (s.state === 'RUNNING') c += ' done';
-        else if (i < at) c += ' done';
-        else if (i === at) c += (s.state === 'HALTED' || s.state === 'UNKNOWN') ? ' bad' : ' at';
-        return `<div class="${c}">${p}</div>`;
+        if (i === at)                              c += isBad ? ' bad current' : ' at current';
+        else if (at > -1 && i < at)                c += ' done';
+        return `<div class="${c}">${p}${i === at ? '<span class="step-now">NOW</span>' : ''}</div>`;
       }).join('');
+
+      // Plus an unambiguous sentence, so reading this never depends on chip styling or
+      // on the header badge being visible.
+      const nowEl = $('sf-now');
+      if (nowEl) {
+        nowEl.innerHTML = `Current state: <b class="${isBad ? 'text-red' : 'text-green'}">${s.state}</b>`
+          + ` — ${s.executionAllowed
+                ? '<span class="text-green">execution permitted, nothing is halted</span>'
+                : '<span class="text-red">execution BLOCKED</span>'}`
+          + (isBad ? ' · the states left of NOW are the recovery path, not the current position' : '');
+      }
 
       $('sf-exec').innerHTML = s.executionAllowed
         ? '<span class="text-green">YES</span>' : '<span class="text-red">NO — blocked</span>';
