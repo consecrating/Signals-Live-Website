@@ -131,6 +131,9 @@
       <div style="margin-top:0.7rem;border-top:1px solid var(--gm-bd);padding-top:0.5rem">
         <div style="font-size:0.7rem;color:#93a4bd;margin-bottom:0.3rem">ACTIVE GUARDRAILS (deterministic, server-enforced)</div>
         <div id="sf-limits" class="muted"></div>
+        <!-- Server worker liveness. The single most important thing to know when no
+             browser is open: is anything actually running? -->
+        <div id="sf-worker" class="muted" style="margin-top:0.5rem"></div>
       </div>
     </section>
 
@@ -307,7 +310,11 @@
                     volumeNote: 'Index spot volume does not exist (NSE publishes none). Option-chain volume '
                               + 'is measured as a liquidity gate but deliberately NOT scored into direction, '
                               + 'because volume shows how much traded and never on which side.',
+                    automation: 'api/cron.php runs the same engine server-side on a schedule, so signals, '
+                              + 'alerts and position exits (stop/target/trail/15:20 square-off) continue with '
+                              + 'no browser open. It deliberately does NOT open new positions autonomously.',
                   },
+                  serverWorker: null,
                   updatedAt: null };
 
     (function ms(){ const i=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
@@ -716,6 +723,38 @@
         + `border-radius:6px;padding:0.45rem 0.6rem;font-size:0.7rem;color:${vpal[1]}">`
         + `${rk.verdict?.text || 'No closed trades yet.'}</div>`;
 
+      // ── server worker liveness ────────────────────────────────────────────
+      // Until now every part of this system needed an open tab, so "is it running?"
+      // was the same question as "is this page open?". With api/cron.php that is no
+      // longer true, and the honest answer has to be shown: how long ago the SERVER
+      // last ticked, independent of this browser.
+      try {
+        // Public snapshot, not brain-data/ — that directory is denied to the web by
+        // .htaccess (paper state, full signal history) and stays that way.
+        const sw = await fetch('/signals/server-signals.json?cb=' + Date.now(), noStore);
+        const el = $('sf-worker');
+        if (!sw.ok) {
+          el.innerHTML = '<span class="text-amber">⚠ Server worker: never run.</span> '
+            + 'Signals stop when this browser is closed until cron is pointed at '
+            + '<code>api/cron.php</code> — see docs/CRON-SETUP.md.';
+          CTX.serverWorker = { running: false };
+        } else {
+          const d = await sw.json();
+          const ageMin = Math.floor((Date.now() - Date.parse(d.generatedAt)) / 60000);
+          const live = ageMin <= 10;
+          const counts = Object.values(d.signals || {});
+          const actionable = counts.filter(s => s.direction && s.direction !== 'NO_TRADE').length;
+          el.innerHTML = `<span class="${live ? 'text-green' : 'text-amber'}">`
+            + `${live ? '●' : '⚠'} Server worker: last tick ${ageMin <= 0 ? 'just now' : ageMin + 'm ago'}`
+            + `</span> · ${counts.length} instruments scanned, ${actionable} actionable`
+            + ` · market ${d.marketOpen ? 'open' : 'closed'}`
+            + (live ? ' · <span class="text-green">signals run with every device off</span>'
+                    : ' · <span class="text-amber">stale — check the cron schedule</span>');
+          CTX.serverWorker = { running: live, lastTickMinutesAgo: ageMin,
+                               marketOpen: d.marketOpen, actionable, signals: d.signals };
+        }
+      } catch (e) { /* non-fatal */ }
+
       // ── offline backtest summary ──
       let off = null;
       try {
@@ -831,6 +870,7 @@
         marketOpen: CTX.marketOpen,
         strategy: CTX.strategy,
         validation: CTX.validation,
+        serverWorker: CTX.serverWorker,
         safety: CTX.safety && { state: CTX.safety.state, executionAllowed: CTX.safety.executionAllowed, reason: CTX.safety.reason },
         integrity: CTX.integrity && { clean: CTX.integrity.clean, findings: CTX.integrity.findings.map(f=>f.code) } };
       const add = { market:{ indices: CTX.market }, chain:{ chain: CTX.chain },
